@@ -1,0 +1,16 @@
+# build outputs
+build/pdn_system_test_simu
+test/*.o
+*.o
+*.vcd
+waveform_pdn_system.vcd
+
+# generated result files
+build/pdn_learning_metrics.csv
+build/pdn_paper_comparison.csv
+build/results/
+build/results_after_model_fix/
+
+# Python cache
+__pycache__/
+*.pyc
