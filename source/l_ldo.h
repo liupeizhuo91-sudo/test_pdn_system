@@ -42,8 +42,11 @@ SC_MODULE(l_ldo) {
     sc_core::sc_signal<bool> event_over_raw{"event_over_raw"};
     sc_core::sc_signal<bool> event_under_d{"event_under_d"};
     sc_core::sc_signal<bool> event_over_d{"event_over_d"};
+    sc_core::sc_signal<sc_dt::sc_int<2>> no_eec_guard{"no_eec_guard"};
     static const unsigned kStartupCode = 0x4000u;
     static const unsigned kNoEecLocalBias = 0x4000u;
+    static const unsigned kNoEecDroopBoost = 0x5000u;
+    static const unsigned kNoEecOvershootTrim = 0x2000u;
 
     comparator comp_under{"comp_under"};
     comparator comp_over{"comp_over"};
@@ -75,6 +78,15 @@ SC_MODULE(l_ldo) {
         const unsigned value = lhs.to_uint() + rhs.to_uint();
         return value > 0xFFFFu ? sc_dt::sc_uint<16>(0xFFFFu)
                                : sc_dt::sc_uint<16>(value);
+    }
+
+    static sc_dt::sc_uint<16> sat_sub_unsigned(sc_dt::sc_uint<16> lhs,
+                                               sc_dt::sc_uint<16> rhs)
+    {
+        const unsigned lhs_value = lhs.to_uint();
+        const unsigned rhs_value = rhs.to_uint();
+        return rhs_value > lhs_value ? sc_dt::sc_uint<16>(0u)
+                                     : sc_dt::sc_uint<16>(lhs_value - rhs_value);
     }
 
     
@@ -112,9 +124,19 @@ SC_MODULE(l_ldo) {
         }
 
         if (!eec_enabled) {
-            code_sum.write(sat_add_unsigned(
+            const sc_dt::sc_uint<16> base_code = sat_add_unsigned(
                 global_code.read(),
-                sc_dt::sc_uint<16>(kNoEecLocalBias)));
+                sc_dt::sc_uint<16>(kNoEecLocalBias));
+            const int guard = no_eec_guard.read().to_int();
+            if (guard > 0) {
+                code_sum.write(sat_add_unsigned(
+                    base_code, sc_dt::sc_uint<16>(kNoEecDroopBoost)));
+            } else if (guard < 0) {
+                code_sum.write(sat_sub_unsigned(
+                    base_code, sc_dt::sc_uint<16>(kNoEecOvershootTrim)));
+            } else {
+                code_sum.write(base_code);
+            }
             return;
         }
 
@@ -138,6 +160,24 @@ SC_MODULE(l_ldo) {
     {
         return event_under_raw.read() || event_over_raw.read();
     }
+
+    void sample_no_eec_guard()
+    {
+        if (!rst_n.read() || eec_enabled) {
+            no_eec_guard.write(0);
+            return;
+        }
+
+        const bool under = event_under_raw.read();
+        const bool over = event_over_raw.read();
+        if (under && !over)
+            no_eec_guard.write(1);
+        else if (!under && over)
+            no_eec_guard.write(-1);
+        else
+            no_eec_guard.write(0);
+    }
+
     void mux_clk()
     {
         if (!rst_n.read()) {
@@ -201,6 +241,7 @@ SC_MODULE(l_ldo) {
         last_ctrl_sig.write(kStartupCode);
         code_sum.write(kStartupCode);
         gate_word.write(code_to_gate_word(sc_dt::sc_uint<16>(kStartupCode)));
+        no_eec_guard.write(0);
 
         vsink.p(vout);
         vsink.n(vss);
@@ -243,8 +284,13 @@ SC_MODULE(l_ldo) {
 
         SC_METHOD(mux_control_code);
         sensitive << event_under_d << event_over_d
+                  << no_eec_guard
                   << rst_n << global_code << last_ctrl_sig
                   << ctie_hi_code << ctie_lo_code;
+
+        SC_METHOD(sample_no_eec_guard);
+        sensitive << clk_sys.pos() << rst_n.neg();
+        dont_initialize();
 
         SC_METHOD(mux_clk);
         sensitive << en_slow_sig << clk_sys << rst_n
