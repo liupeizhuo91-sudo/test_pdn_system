@@ -72,12 +72,17 @@ summarize:
 		--overshoot-allowance-mv $(PERF_OVERSHOOT_ALLOWANCE_MV) \
 		--overshoot-penalty $(PERF_OVERSHOOT_PENALTY)
 
+visualize:
+	@$(PYTHON) ../scripts/visualize_pdn_results.py \
+		--results-dir $(RESULTS_DIR)
+
 full-experiment:
 	@$(MAKE) clean
 	@$(MAKE) clean-results
 	@$(MAKE) all
 	@$(MAKE) sweep
 	@$(MAKE) summarize
+	@$(MAKE) visualize
 	@echo "Automated experiment complete. Results are under $(RESULTS_DIR)/"
 
 clean:
@@ -87,4 +92,4 @@ clean:
 clean-results:
 	rm -rf $(RESULTS_DIR)
 
-.PHONY: all run run-fast run-full run-no_learning run-no_eec run-no_balance run-baseline_all_off sweep summarize full-experiment clean clean-results
+.PHONY: all run run-fast run-full run-no_learning run-no_eec run-no_balance run-baseline_all_off sweep summarize visualize full-experiment clean clean-results

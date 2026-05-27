@@ -1,0 +1,44 @@
+metric,scenario,paper_value,model_value,unit,note
+baseline_max_droop,dense_10pct_75pct,128.000000,32.888571,mV,Fig.9 first iteration baseline
+best_max_droop,dense_10pct_75pct,65.300000,19.635516,mV,Fig.9 learned best window
+baseline_pkpk,dense_10pct_75pct,,70.524878,mV,Model peak-to-peak window value
+best_pkpk,dense_10pct_75pct,,54.003301,mV,Model best peak-to-peak window value
+pkpk_reduction,dense_10pct_75pct,,23.426594,%,Computed from model baseline and best peak-to-peak values
+droop_reduction,dense_10pct_75pct,49.000000,40.296840,%,Computed from model baseline and best droop
+best_iteration,dense_10pct_75pct,29.000000,3.000000,iter,Learning window index
+avg_load_current,dense_10pct_75pct,440.000000,440.022525,mA,Fig.8 dense average current target
+peak_load_current,dense_10pct_75pct,,532.263314,mA,Model workload peak; paper reports dense average current
+event_latency,dense_10pct_75pct,400.000000,0.000000,ps,Modeled EEC clock-period bound; paper critical path is <400ps
+best_current_stddev,dense_10pct_75pct,5.000000,0.036093,mA,Best window average source-current sigma; paper target is <5mA
+best_efficiency,dense_10pct_75pct,99.900000,73.753660,%,Peak current efficiency estimated as Iload/(Iload+Iq)
+baseline_max_droop,medium_50pct_50pct,104.000000,0.000000,mV,Fig.9 first iteration baseline
+best_max_droop,medium_50pct_50pct,48.000000,0.000000,mV,Fig.9 learned best window
+baseline_pkpk,medium_50pct_50pct,,40.284167,mV,Model peak-to-peak window value
+best_pkpk,medium_50pct_50pct,,40.284167,mV,Model best peak-to-peak window value
+pkpk_reduction,medium_50pct_50pct,,0.000000,%,Computed from model baseline and best peak-to-peak values
+droop_reduction,medium_50pct_50pct,53.800000,,%,Computed from model baseline and best droop
+best_iteration,medium_50pct_50pct,23.000000,1.000000,iter,Learning window index
+avg_load_current,medium_50pct_50pct,,332.115385,mA,No explicit paper value for this scenario
+peak_load_current,medium_50pct_50pct,,366.286982,mA,Model workload peak; paper reports dense average current
+event_latency,medium_50pct_50pct,400.000000,0.000000,ps,Modeled EEC clock-period bound; paper critical path is <400ps
+best_current_stddev,medium_50pct_50pct,5.000000,0.009481,mA,Best window average source-current sigma; paper target is <5mA
+best_efficiency,medium_50pct_50pct,99.900000,77.112554,%,Peak current efficiency estimated as Iload/(Iload+Iq)
+baseline_max_droop,sparse_90pct_25pct,80.000000,11.398792,mV,Fig.9 first iteration baseline
+best_max_droop,sparse_90pct_25pct,23.000000,11.258653,mV,Fig.9 learned best window
+baseline_pkpk,sparse_90pct_25pct,,31.443217,mV,Model peak-to-peak window value
+best_pkpk,sparse_90pct_25pct,,15.645490,mV,Model best peak-to-peak window value
+pkpk_reduction,sparse_90pct_25pct,,50.242082,%,Computed from model baseline and best peak-to-peak values
+droop_reduction,sparse_90pct_25pct,71.300000,1.229424,%,Computed from model baseline and best droop
+best_iteration,sparse_90pct_25pct,23.000000,30.000000,iter,Learning window index
+avg_load_current,sparse_90pct_25pct,,275.000000,mA,No explicit paper value for this scenario
+peak_load_current,sparse_90pct_25pct,,278.417160,mA,Model workload peak; paper reports dense average current
+event_latency,sparse_90pct_25pct,400.000000,0.000000,ps,Modeled EEC clock-period bound; paper critical path is <400ps
+best_current_stddev,sparse_90pct_25pct,5.000000,0.000781,mA,Best window average source-current sigma; paper target is <5mA
+best_efficiency,sparse_90pct_25pct,99.900000,79.871410,%,Peak current efficiency estimated as Iload/(Iload+Iq)
+eec_dense_pkpk,dense_10pct_75pct,128.000000,70.524878,mV,First measured dense window after warm-up; use --disable-learning for pure w/o-learning mode
+resistor_step_undershoot,standalone_step,35.000000,78.961067,mV,Model step phase uses total load 116mA->506mA
+resistor_step_overshoot,standalone_step,15.700000,48.554880,mV,Model step phase uses total load 506mA->330mA
+energy_saving_min,overall_ai,21.100000,,%,Requires paired runs against --disable-learning or --disable-eec
+energy_saving_max,overall_ai,33.300000,,%,Requires paired runs against --disable-learning or --disable-eec
+performance_improvement_min,overall_ai,12.300000,,%,Requires a DVFS/performance model
+performance_improvement_max,overall_ai,22.500000,,%,Requires a DVFS/performance model
