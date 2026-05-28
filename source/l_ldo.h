@@ -127,16 +127,7 @@ SC_MODULE(l_ldo) {
             const sc_dt::sc_uint<16> base_code = sat_add_unsigned(
                 global_code.read(),
                 sc_dt::sc_uint<16>(kNoEecLocalBias));
-            const int guard = no_eec_guard.read().to_int();
-            if (guard > 0) {
-                code_sum.write(sat_add_unsigned(
-                    base_code, sc_dt::sc_uint<16>(kNoEecDroopBoost)));
-            } else if (guard < 0) {
-                code_sum.write(sat_sub_unsigned(
-                    base_code, sc_dt::sc_uint<16>(kNoEecOvershootTrim)));
-            } else {
-                code_sum.write(base_code);
-            }
+            code_sum.write(base_code);
             return;
         }
 
@@ -168,14 +159,7 @@ SC_MODULE(l_ldo) {
             return;
         }
 
-        const bool under = event_under_raw.read();
-        const bool over = event_over_raw.read();
-        if (under && !over)
-            no_eec_guard.write(1);
-        else if (!under && over)
-            no_eec_guard.write(-1);
-        else
-            no_eec_guard.write(0);
+        no_eec_guard.write(0);
     }
 
     void mux_clk()

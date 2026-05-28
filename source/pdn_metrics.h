@@ -19,6 +19,9 @@ SC_MODULE(paper_workload) {
     unsigned warmup_cycles;
     double leakage_current;
     double dynamic_current;
+    double medium_activity_gain;
+    double sparse_activity_gain;
+    double burst_low_ratio;
     unsigned long long cycle;
 
     sc_core::sc_in<bool> clk;
@@ -118,11 +121,17 @@ SC_MODULE(paper_workload) {
         const unsigned long long effective_cycle =
             cycle >= warmup_cycles ? cycle - warmup_cycles : 0ULL;
         const bool burst_high = ((effective_cycle / 32ULL) % 2ULL) == 0ULL;
-        const double burst = burst_high ? 1.0 : 0.30;
+        const double burst = burst_high ? 1.0 : burst_low_ratio;
         const double density = std::max(0.0, 1.0 - sparsity) * toggle;
+        double scenario_gain = 1.0;
+        if (index == 1)
+            scenario_gain = medium_activity_gain;
+        else if (index == 2)
+            scenario_gain = sparse_activity_gain;
 
         for (std::size_t i = 0; i < num_clusters; ++i) {
-            const double act = std::min(1.0, density * burst * spatial_profile(i));
+            const double act = std::min(
+                1.0, density * burst * scenario_gain * spatial_profile(i));
             activity[i].write(act);
             load_current[i].write(leakage_current + dynamic_current * act);
         }
@@ -147,6 +156,9 @@ SC_MODULE(paper_workload) {
                    unsigned cycles_per_window_ = 256,
                    double leakage_current_ = 1.0e-3,
                    double dynamic_current_ = 18.0e-3,
+                   double medium_activity_gain_ = 1.35,
+                   double sparse_activity_gain_ = 2.40,
+                   double burst_low_ratio_ = 0.20,
                    unsigned warmup_cycles_ = 0)
         : sc_module(name_),
           num_clusters(num_clusters_),
@@ -155,6 +167,9 @@ SC_MODULE(paper_workload) {
           warmup_cycles(warmup_cycles_),
           leakage_current(leakage_current_),
           dynamic_current(dynamic_current_),
+          medium_activity_gain(medium_activity_gain_),
+          sparse_activity_gain(sparse_activity_gain_),
+          burst_low_ratio(burst_low_ratio_),
           cycle(0),
           clk("clk"),
           rst_n("rst_n"),
@@ -183,6 +198,10 @@ SC_MODULE(pdn_paper_monitor) {
         double baseline_pkpk_mv;
         double best_droop_mv;
         double best_pkpk_mv;
+        double droop_at_best_pkpk_mv;
+        double overshoot_at_best_pkpk_mv;
+        unsigned best_droop_iter;
+        unsigned best_pkpk_iter;
         unsigned best_iter;
         double final_droop_mv;
         double final_pkpk_mv;
@@ -216,6 +235,10 @@ SC_MODULE(pdn_paper_monitor) {
               baseline_pkpk_mv(0.0),
               best_droop_mv(std::numeric_limits<double>::max()),
               best_pkpk_mv(std::numeric_limits<double>::max()),
+              droop_at_best_pkpk_mv(std::numeric_limits<double>::max()),
+              overshoot_at_best_pkpk_mv(std::numeric_limits<double>::max()),
+              best_droop_iter(0),
+              best_pkpk_iter(0),
               best_iter(0),
               final_droop_mv(0.0),
               final_pkpk_mv(0.0),
@@ -692,9 +715,16 @@ SC_MODULE(pdn_paper_monitor) {
             report.baseline_pkpk_mv = pkpk_mv;
         }
 
+        if (droop_mv < report.best_droop_mv) {
+            report.best_droop_mv = droop_mv;
+            report.best_droop_iter = report.iteration;
+        }
+
         if (pkpk_mv < report.best_pkpk_mv) {
             report.best_pkpk_mv = pkpk_mv;
-            report.best_droop_mv = droop_mv;
+            report.droop_at_best_pkpk_mv = droop_mv;
+            report.overshoot_at_best_pkpk_mv = overshoot_mv;
+            report.best_pkpk_iter = report.iteration;
             report.best_iter = report.iteration;
         }
 
@@ -975,27 +1005,41 @@ SC_MODULE(pdn_paper_monitor) {
         for (std::size_t i = 0; i < 3 && i < reports.size(); ++i) {
             const ScenarioReport& r = reports[i];
             const bool measured = r.seen && r.measured_windows > 0;
-            const bool has_best = measured && has_measurement(r.best_droop_mv);
+            const bool has_best_droop =
+                measured && has_measurement(r.best_droop_mv);
+            const bool has_best_pkpk =
+                measured && has_measurement(r.best_pkpk_mv) &&
+                has_measurement(r.droop_at_best_pkpk_mv);
             write_comparison_metric_optional("baseline_max_droop", r.name,
                                              true, r.paper_baseline_droop_mv,
                                              measured, r.baseline_droop_mv, "mV",
                                              "Fig.9 first iteration baseline");
             write_comparison_metric_optional("best_max_droop", r.name,
                                              true, r.paper_best_droop_mv,
-                                             has_best, r.best_droop_mv, "mV",
-                                             "Fig.9 learned best window");
+                                             has_best_pkpk,
+                                             r.droop_at_best_pkpk_mv, "mV",
+                                             "Droop at model best peak-to-peak window");
+            write_comparison_metric_optional("best_iteration_droop", r.name,
+                                             false, 0.0,
+                                             has_best_pkpk,
+                                             r.droop_at_best_pkpk_mv, "mV",
+                                             "Droop sampled at minimum peak-to-peak iteration");
+            write_comparison_metric_optional("min_droop", r.name,
+                                             false, 0.0,
+                                             has_best_droop, r.best_droop_mv, "mV",
+                                             "Minimum droop across learning windows");
             write_comparison_metric_optional("baseline_pkpk", r.name,
                                              false, 0.0,
                                              measured, r.baseline_pkpk_mv, "mV",
                                              "Model peak-to-peak window value");
             write_comparison_metric_optional("best_pkpk", r.name,
                                              false, 0.0,
-                                             has_best, r.best_pkpk_mv, "mV",
+                                             has_best_pkpk, r.best_pkpk_mv, "mV",
                                              "Model best peak-to-peak window value");
             write_comparison_metric_optional(
                 "pkpk_reduction", r.name,
                 false, 0.0,
-                has_best && std::fabs(r.baseline_pkpk_mv) > 1.0e-18,
+                has_best_pkpk && std::fabs(r.baseline_pkpk_mv) > 1.0e-18,
                 safe_pct(r.baseline_pkpk_mv - r.best_pkpk_mv,
                          r.baseline_pkpk_mv),
                 "%",
@@ -1003,16 +1047,16 @@ SC_MODULE(pdn_paper_monitor) {
             write_comparison_metric_optional(
                 "droop_reduction", r.name,
                 true, r.paper_reduction_pct,
-                has_best && std::fabs(r.baseline_droop_mv) > 1.0e-18,
-                safe_pct(r.baseline_droop_mv - r.best_droop_mv,
+                has_best_pkpk && std::fabs(r.baseline_droop_mv) > 1.0e-18,
+                safe_pct(r.baseline_droop_mv - r.droop_at_best_pkpk_mv,
                          r.baseline_droop_mv),
                 "%",
-                "Computed from model baseline and best droop");
+                "Computed from baseline droop and droop at best peak-to-peak window");
             write_comparison_metric_optional("best_iteration", r.name,
                                              true, static_cast<double>(r.paper_best_iter),
-                                             has_best,
+                                             has_best_pkpk,
                                              static_cast<double>(r.best_iter), "iter",
-                                             "Learning window index");
+                                             "Learning window index selected by minimum peak-to-peak");
             write_comparison_metric_optional("avg_load_current", r.name,
                                              i == 0, 440.0,
                                              measured, r.mean_load_ma, "mA",

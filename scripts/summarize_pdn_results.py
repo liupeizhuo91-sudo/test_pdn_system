@@ -112,6 +112,15 @@ def fmt(value):
     return "" if not math.isfinite(value) else f"{value:.6f}"
 
 
+def pct_reduction(baseline, improved):
+    return (
+        (baseline - improved) / baseline * 100.0
+        if math.isfinite(baseline) and math.isfinite(improved) and
+        abs(baseline) > 1.0e-18
+        else math.nan
+    )
+
+
 def csv_flag(row, key):
     value = row.get(key, "")
     return value not in ("", "0", "0.000000", "false", "False")
@@ -125,11 +134,32 @@ def scenario_rows(rows, scenario):
     return [row for row in rows if row["scenario"] == scenario]
 
 
+def sorted_by_float(rows, key):
+    return sorted(rows, key=lambda row: to_float(row, key))
+
+
+def best_pkpk_row(rows, scenario):
+    subset = sorted_by_float(scenario_rows(rows, scenario), "iteration")
+    if not subset:
+        return None
+    return min(
+        subset,
+        key=lambda row: (
+            to_float(row, "pkpk_mv")
+            if math.isfinite(to_float(row, "pkpk_mv"))
+            else math.inf
+        ),
+    )
+
+
 def summarize_case(case, rows):
     out = []
     scenarios = sorted({row["scenario"] for row in rows})
     for scenario in scenarios:
-        subset = scenario_rows(rows, scenario)
+        subset = sorted_by_float(scenario_rows(rows, scenario), "iteration")
+        best_row = best_pkpk_row(rows, scenario)
+        baseline_droop = to_float(subset[0], "baseline_droop_mv")
+        droop_at_best_pkpk = to_float(best_row, "droop_mv")
         out.append({
             "case": case,
             "scenario": scenario,
@@ -143,6 +173,11 @@ def summarize_case(case, rows):
             "rail_violation_windows": sum(1 for r in subset if csv_flag(r, "rail_violation")),
             "best_droop_mv": fmt(min(to_float(r, "droop_mv") for r in subset)),
             "best_pkpk_mv": fmt(min(to_float(r, "pkpk_mv") for r in subset)),
+            "best_pkpk_iteration": fmt(to_float(best_row, "iteration")),
+            "baseline_droop_mv": fmt(baseline_droop),
+            "droop_at_best_pkpk_mv": fmt(droop_at_best_pkpk),
+            "droop_reduction_at_best_pkpk_pct": fmt(
+                pct_reduction(baseline_droop, droop_at_best_pkpk)),
             "avg_load_ma": fmt(avg(to_float(r, "avg_load_ma") for r in subset)),
         })
     return out
@@ -346,12 +381,186 @@ def build_performance_summary(case_rows, vnom_v, vth_v, alpha,
     return rows
 
 
-def complete_paper_comparison(results_dir, energy_rows, performance_rows):
+def complete_paper_comparison(results_dir, energy_rows, performance_rows,
+                              droop_percentile=DEFAULT_DROOP_PERCENTILE):
     source = results_dir / "full" / "pdn_paper_comparison.csv"
     if not source.exists():
         return []
 
     rows = read_rows(source)
+    full_by_key = {(row["metric"], row["scenario"]): row for row in rows}
+    full_learning_source = results_dir / "full" / "pdn_learning_metrics.csv"
+    full_learning_rows = (
+        read_rows(full_learning_source) if full_learning_source.exists() else []
+    )
+
+    def set_model_metric(metric, scenario, value, note=None):
+        for row in rows:
+            if row.get("metric") == metric and row.get("scenario") == scenario:
+                row["model_value"] = fmt(value)
+                if note is not None:
+                    row["note"] = note
+                return
+        unit = ""
+        if "reduction" in metric:
+            unit = "%"
+        elif metric == "best_iteration":
+            unit = "iter"
+        elif "droop" in metric or "pkpk" in metric:
+            unit = "mV"
+        rows.append({
+            "metric": metric,
+            "scenario": scenario,
+            "paper_value": "",
+            "model_value": fmt(value),
+            "unit": unit,
+            "note": note or "",
+        })
+
+    for scenario in AI_SCENARIOS:
+        best_row = best_pkpk_row(full_learning_rows, scenario)
+        if best_row is None:
+            continue
+        baseline_droop = to_float(best_row, "baseline_droop_mv")
+        baseline_pkpk = to_float(best_row, "baseline_pkpk_mv")
+        droop_at_best_pkpk = to_float(best_row, "droop_mv")
+        best_pkpk = to_float(best_row, "pkpk_mv")
+        best_iteration = to_float(best_row, "iteration")
+        set_model_metric(
+            "best_max_droop", scenario, droop_at_best_pkpk,
+            "Droop at model best peak-to-peak window")
+        set_model_metric(
+            "best_iteration_droop", scenario, droop_at_best_pkpk,
+            "Droop sampled at minimum peak-to-peak iteration")
+        set_model_metric(
+            "best_pkpk", scenario, best_pkpk,
+            "Model best peak-to-peak window value")
+        set_model_metric(
+            "droop_reduction", scenario,
+            pct_reduction(baseline_droop, droop_at_best_pkpk),
+            "Computed from baseline droop and droop at best peak-to-peak window")
+        set_model_metric(
+            "pkpk_reduction", scenario,
+            pct_reduction(baseline_pkpk, best_pkpk),
+            "Computed from model baseline and best peak-to-peak values")
+        set_model_metric(
+            "best_iteration", scenario, best_iteration,
+            "Learning window index selected by minimum peak-to-peak")
+
+    full_by_key = {(row["metric"], row["scenario"]): row for row in rows}
+    paired_rows = []
+
+    baseline_source = results_dir / "baseline_all_off" / "pdn_paper_comparison.csv"
+    baseline_learning_source = (
+        results_dir / "baseline_all_off" / "pdn_learning_metrics.csv"
+    )
+    if baseline_source.exists():
+        baseline_rows = read_rows(baseline_source)
+        baseline_learning_rows = (
+            read_rows(baseline_learning_source)
+            if baseline_learning_source.exists() else []
+        )
+        baseline_by_key = {
+            (row["metric"], row["scenario"]): row for row in baseline_rows
+        }
+
+        def model_value(table, metric, scenario):
+            row = table.get((metric, scenario))
+            return to_float(row, "model_value") if row else math.nan
+
+        def learning_values(table, scenario, key):
+            return [
+                to_float(row, key)
+                for row in table
+                if row.get("scenario") == scenario
+            ]
+
+        def learning_stat(table, scenario, key, pct):
+            return percentile(learning_values(table, scenario, key), pct)
+
+        def learning_final(table, scenario, key):
+            values = [
+                value for value in learning_values(table, scenario, key)
+                if math.isfinite(value)
+            ]
+            return values[-1] if values else math.nan
+
+        def paired_baseline_stat(scenario, metric):
+            key = "droop_mv" if metric == "baseline_max_droop" else "pkpk_mv"
+            values = learning_values(baseline_learning_rows, scenario, key)
+            values = [value for value in values if math.isfinite(value)]
+            if values:
+                return max(values)
+            return model_value(baseline_by_key, metric, scenario)
+
+        def append_paired(metric, scenario, value, unit, note):
+            paired_rows.append({
+                "metric": metric,
+                "scenario": scenario,
+                "paper_value": "",
+                "model_value": fmt(value),
+                "unit": unit,
+                "note": note,
+            })
+
+        for scenario in AI_SCENARIOS:
+            baseline_droop = paired_baseline_stat(scenario,
+                                                  "baseline_max_droop")
+            best_droop = model_value(full_by_key, "best_max_droop",
+                                     scenario)
+            baseline_pkpk = paired_baseline_stat(scenario, "baseline_pkpk")
+            best_pkpk = model_value(full_by_key, "best_pkpk", scenario)
+
+            append_paired("paired_baseline_max_droop", scenario,
+                          baseline_droop, "mV",
+                          "baseline_all_off max droop across windows")
+            append_paired("paired_full_best_droop", scenario,
+                          best_droop, "mV",
+                          "full-case droop at best peak-to-peak window")
+            droop_reduction = pct_reduction(baseline_droop, best_droop)
+            append_paired("paired_droop_reduction", scenario,
+                          droop_reduction, "%",
+                          "full droop at best peak-to-peak vs baseline_all_off max droop")
+
+            append_paired("paired_baseline_pkpk", scenario,
+                          baseline_pkpk, "mV",
+                          "baseline_all_off max peak-to-peak across windows")
+            append_paired("paired_full_best_pkpk", scenario,
+                          best_pkpk, "mV",
+                          "full-case best peak-to-peak window")
+            pkpk_reduction = pct_reduction(baseline_pkpk, best_pkpk)
+            append_paired("paired_pkpk_reduction", scenario,
+                          pkpk_reduction, "%",
+                          "full best peak-to-peak vs baseline_all_off max peak-to-peak")
+
+            baseline_p95 = learning_stat(baseline_learning_rows, scenario,
+                                         "droop_mv", droop_percentile)
+            full_p95 = learning_stat(full_learning_rows, scenario,
+                                     "droop_mv", droop_percentile)
+            append_paired("paired_baseline_p95_droop", scenario,
+                          baseline_p95, "mV",
+                          f"baseline_all_off p{droop_percentile:g} droop")
+            append_paired("paired_full_p95_droop", scenario,
+                          full_p95, "mV",
+                          f"full-case p{droop_percentile:g} droop")
+            append_paired("paired_p95_droop_reduction", scenario,
+                          pct_reduction(baseline_p95, full_p95), "%",
+                          "stable p95 droop reduction vs baseline_all_off")
+
+            baseline_final = learning_final(baseline_learning_rows, scenario,
+                                            "droop_mv")
+            full_final = learning_final(full_learning_rows, scenario,
+                                        "droop_mv")
+            append_paired("paired_baseline_final_droop", scenario,
+                          baseline_final, "mV",
+                          "baseline_all_off final-window droop")
+            append_paired("paired_full_final_droop", scenario,
+                          full_final, "mV",
+                          "full-case final-window droop")
+            append_paired("paired_final_droop_reduction", scenario,
+                          pct_reduction(baseline_final, full_final), "%",
+                          "final-window droop reduction vs baseline_all_off")
+
     energy_values = [
         float(row["energy_saving_pct"])
         for row in energy_rows
@@ -388,7 +597,7 @@ def complete_paper_comparison(results_dir, energy_rows, performance_rows):
             elif row["metric"] == "performance_improvement_max":
                 row["model_value"] = fmt(performance_max)
                 row["note"] = "Estimated by alpha-power DVFS model from automated paired runs"
-    return rows
+    return rows + paired_rows
 
 
 def main():
@@ -432,6 +641,10 @@ def main():
             "rail_violation_windows",
             "best_droop_mv",
             "best_pkpk_mv",
+            "best_pkpk_iteration",
+            "baseline_droop_mv",
+            "droop_at_best_pkpk_mv",
+            "droop_reduction_at_best_pkpk_pct",
             "avg_load_ma",
         ),
         case_summary,
@@ -487,7 +700,8 @@ def main():
     )
 
     completed = complete_paper_comparison(
-        results_dir, energy_summary, performance_summary)
+        results_dir, energy_summary, performance_summary,
+        args.droop_percentile)
     if completed:
         write_rows(
             results_dir / "paper_comparison_completed.csv",

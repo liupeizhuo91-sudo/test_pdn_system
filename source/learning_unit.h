@@ -21,6 +21,8 @@ SC_MODULE(learning_unit) {
         sc_dt::sc_uint<16> ctie_hi;
         sc_dt::sc_uint<16> ctie_lo;
         double best_pkpk;
+        double best_droop;
+        double best_score;
         bool learned;
 
         Entry()
@@ -31,6 +33,8 @@ SC_MODULE(learning_unit) {
               ctie_hi(0xC000),
               ctie_lo(0x1000),
               best_pkpk(1.0),
+              best_droop(1.0),
+              best_score(1.0),
               learned(false)
         {}
     };
@@ -131,6 +135,8 @@ SC_MODULE(learning_unit) {
                 e.ctie_lo = sc_dt::sc_uint<16>(
                     std::min<unsigned>(0xFFFFu, lo_code));
                 e.best_pkpk = 1.0;
+                e.best_droop = 1.0;
+                e.best_score = 1.0;
                 e.learned = false;
             }
         }
@@ -157,6 +163,8 @@ SC_MODULE(learning_unit) {
         e.ctie_hi = sc_dt::sc_uint<16>(0x6800);
         e.ctie_lo = sc_dt::sc_uint<16>(0x1800);
         e.best_pkpk = 1.0;
+        e.best_droop = 1.0;
+        e.best_score = 1.0;
         e.learned = false;
         return e;
     }
@@ -205,22 +213,45 @@ SC_MODULE(learning_unit) {
         const int code_step = static_cast<int>(
             learn_step_code * (1u + static_cast<unsigned>(std::lround(3.0 * density))));
 
-        const bool unstable = e.learned && (pkpk > e.best_pkpk + 0.010);
-        if (!e.learned || pkpk < e.best_pkpk) {
+        const double droop_excess = std::max(0.0, droop - target_droop);
+        const double overshoot_excess = std::max(0.0, overshoot - target_overshoot);
+        const double score = pkpk + 2.0 * droop_excess + overshoot_excess;
+
+        const bool was_learned = e.learned;
+        const bool droop_regressed =
+            was_learned && droop > target_droop &&
+            droop > e.best_droop + 0.012;
+        const bool pkpk_regressed =
+            was_learned && pkpk > e.best_pkpk + 0.018 &&
+            score > e.best_score + 0.012;
+        const bool rollback = pkpk_regressed && !droop_regressed;
+
+        if (!was_learned || score < e.best_score) {
+            e.best_score = score;
             e.best_pkpk = pkpk;
+            e.best_droop = droop;
+            e.learned = true;
+        } else {
+            if (pkpk < e.best_pkpk)
+                e.best_pkpk = pkpk;
+            if (droop < e.best_droop && score <= e.best_score + 0.010)
+                e.best_droop = droop;
             e.learned = true;
         }
 
-        if (unstable) {
-            // Roll back toward a wider, less aggressive event window.
+        if (rollback) {
+            // Roll back only when peak-to-peak worsens without a droop need.
             e.vref_low -= 2.0 * v_step;
             e.vref_high += 2.0 * v_step;
             e.ctie_hi = add_code(e.ctie_hi, -code_step);
             e.ctie_lo = add_code(e.ctie_lo, code_step);
         } else {
             if (droop > target_droop) {
-                e.vref_low += v_step;
-                e.ctie_hi = add_code(e.ctie_hi, code_step);
+                const double droop_gain = droop_regressed ? 1.5 : 1.0;
+                e.vref_low += droop_gain * v_step;
+                e.ctie_hi = add_code(
+                    e.ctie_hi,
+                    static_cast<int>(std::lround(droop_gain * code_step)));
             } else {
                 e.vref_low -= 0.25 * v_step;
                 e.ctie_hi = add_code(e.ctie_hi, -code_step / 4);

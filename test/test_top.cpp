@@ -30,10 +30,11 @@ double parse_double_option(const std::string& arg, const char* prefix,
 
 double calibrated_dynamic_current(double target_dense_avg_current,
                                   double leakage_current,
-                                  std::size_t clusters)
+                                  std::size_t clusters,
+                                  double burst_low_ratio)
 {
     const double dense_density = (1.0 - 0.10) * 0.75;
-    const double burst_average = (1.0 + 0.30) * 0.5;
+    const double burst_average = (1.0 + burst_low_ratio) * 0.5;
     const double spatial_sum = 8.35;
     const double dynamic_gain = dense_density * burst_average * spatial_sum;
     const double leakage_total = static_cast<double>(clusters) * leakage_current;
@@ -44,13 +45,17 @@ double calibrated_dynamic_current(double target_dense_avg_current,
 
 double calibrated_background_current(double target_dense_avg_current,
                                      double target_sparse_avg_current,
-                                     std::size_t clusters)
+                                     std::size_t clusters,
+                                     double sparse_activity_gain,
+                                     double burst_low_ratio)
 {
     const double dense_density = (1.0 - 0.10) * 0.75;
     const double sparse_density = (1.0 - 0.90) * 0.25;
-    const double burst_average = (1.0 + 0.30) * 0.5;
+    const double burst_average = (1.0 + burst_low_ratio) * 0.5;
     const double spatial_sum = 8.35;
-    const double density_delta = dense_density - sparse_density;
+    const double sparse_effective_density =
+        sparse_density * sparse_activity_gain;
+    const double density_delta = dense_density - sparse_effective_density;
     if (density_delta <= 0.0 || clusters == 0)
         return 0.0;
 
@@ -58,7 +63,7 @@ double calibrated_background_current(double target_dense_avg_current,
         (target_dense_avg_current - target_sparse_avg_current) /
         (burst_average * spatial_sum * density_delta);
     const double sparse_dynamic =
-        dynamic * burst_average * spatial_sum * sparse_density;
+        dynamic * burst_average * spatial_sum * sparse_effective_density;
     const double background_total =
         target_sparse_avg_current - sparse_dynamic;
     return background_total > 0.0 ?
@@ -83,14 +88,20 @@ int sc_main(int argc, char* argv[])
     const double sys_clk_period_ns = 10.0;
     const double nominal_vref = 0.8;
     const double vin_value = 0.9;
-    const double paper_dense_avg_current = 440.0e-3;
-    const double paper_sparse_avg_proxy = paper_dense_avg_current * 80.0 / 128.0;
+    double paper_dense_avg_current = 440.0e-3;
+    double paper_sparse_avg_proxy = 0.0;
+    double medium_activity_gain = 1.35;
+    double sparse_activity_gain = 2.40;
+    double burst_low_ratio = 0.20;
     const double eec_latency_bound_ps = 200.0;
+    double grid_resistance = 50.0e-3;
+    double local_cout = 3.3e-9;
+    double grid_decap = 0.5e-9;
     bool dynamic_current_overridden = false;
+    bool leakage_current_overridden = false;
+    bool sparse_target_overridden = false;
     double workload_dynamic_current = 0.0;
-    double workload_leakage_current =
-        calibrated_background_current(paper_dense_avg_current,
-                                      paper_sparse_avg_proxy, 9);
+    double workload_leakage_current = 0.0;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg(argv[i]);
@@ -109,14 +120,56 @@ int sc_main(int argc, char* argv[])
         } else if (starts_with(arg, "--leakage-current-ma=")) {
             workload_leakage_current =
                 parse_double_option(arg, "--leakage-current-ma=",
-                                    workload_leakage_current * 1.0e3) * 1.0e-3;
+                                     workload_leakage_current * 1.0e3) * 1.0e-3;
+            leakage_current_overridden = true;
+        } else if (starts_with(arg, "--dense-avg-current-ma=")) {
+            paper_dense_avg_current =
+                parse_double_option(arg, "--dense-avg-current-ma=", 440.0) * 1.0e-3;
+        } else if (starts_with(arg, "--target-sparse-avg-ma=")) {
+            paper_sparse_avg_proxy =
+                parse_double_option(arg, "--target-sparse-avg-ma=", 275.0) * 1.0e-3;
+            sparse_target_overridden = true;
+        } else if (starts_with(arg, "--medium-activity-gain=")) {
+            medium_activity_gain =
+                parse_double_option(arg, "--medium-activity-gain=", 1.35);
+        } else if (starts_with(arg, "--sparse-activity-gain=")) {
+            sparse_activity_gain =
+                parse_double_option(arg, "--sparse-activity-gain=", 2.40);
+        } else if (starts_with(arg, "--burst-low-ratio=")) {
+            burst_low_ratio =
+                parse_double_option(arg, "--burst-low-ratio=", 0.20);
+            if (burst_low_ratio < 0.0)
+                burst_low_ratio = 0.0;
+            else if (burst_low_ratio > 1.0)
+                burst_low_ratio = 1.0;
+        } else if (starts_with(arg, "--grid-resistance-mohm=")) {
+            grid_resistance =
+                parse_double_option(arg, "--grid-resistance-mohm=", 50.0) * 1.0e-3;
+        } else if (starts_with(arg, "--local-cout-nf=")) {
+            local_cout =
+                parse_double_option(arg, "--local-cout-nf=", 3.3) * 1.0e-9;
+        } else if (starts_with(arg, "--grid-decap-nf=")) {
+            grid_decap =
+                parse_double_option(arg, "--grid-decap-nf=", 0.5) * 1.0e-9;
         }
+    }
+
+    if (!sparse_target_overridden)
+        paper_sparse_avg_proxy = paper_dense_avg_current * 80.0 / 128.0;
+
+    if (!leakage_current_overridden) {
+        workload_leakage_current =
+            calibrated_background_current(paper_dense_avg_current,
+                                          paper_sparse_avg_proxy, 9,
+                                          sparse_activity_gain,
+                                          burst_low_ratio);
     }
 
     if (!dynamic_current_overridden) {
         workload_dynamic_current =
             calibrated_dynamic_current(paper_dense_avg_current,
-                                       workload_leakage_current, 9);
+                                       workload_leakage_current, 9,
+                                       burst_low_ratio);
     }
 
     sc_core::sc_clock clk_sys("clk_sys",
@@ -146,6 +199,9 @@ int sc_main(int argc, char* argv[])
                             learn_window_cycles,
                             workload_leakage_current,
                             workload_dynamic_current,
+                            medium_activity_gain,
+                            sparse_activity_gain,
+                            burst_low_ratio,
                             warmup_cycles);
     workload.clk(clk_sys);
     workload.rst_n(rst_n);
@@ -157,7 +213,7 @@ int sc_main(int argc, char* argv[])
     }
 
     distributed_pdn_system dut("dut", 9, nominal_vref,
-                               50.0e-3, 3.3e-9, 0.5e-9,
+                               grid_resistance, local_cout, grid_decap,
                                warmup_cycles);
     dut.clk_sys(clk_sys);
     // dut.clk_eec(clk_eec);
@@ -256,6 +312,17 @@ int sc_main(int argc, char* argv[])
               << workload_leakage_current * 1.0e3 << " mA/cluster"
               << ", dense_avg_target="
               << paper_dense_avg_current * 1.0e3 << " mA"
+              << ", sparse_avg_target="
+              << paper_sparse_avg_proxy * 1.0e3 << " mA"
+              << ", medium_activity_gain=" << medium_activity_gain
+              << ", sparse_activity_gain=" << sparse_activity_gain
+              << ", burst_low_ratio=" << burst_low_ratio
+              << ", grid_resistance="
+              << grid_resistance * 1.0e3 << " mOhm"
+              << ", local_cout="
+              << local_cout * 1.0e9 << " nF"
+              << ", grid_decap="
+              << grid_decap * 1.0e9 << " nF"
               << ", warmup=" << warmup_windows << " windows\n";
     rst_n.write(false);
     sc_core::sc_start(10.0, sc_core::SC_NS);

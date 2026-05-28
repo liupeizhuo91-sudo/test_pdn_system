@@ -49,6 +49,10 @@ CASE_SUMMARY_METRICS = (
     ("avg_efficiency_pct", "Average efficiency (%)"),
     ("best_droop_mv", "Best droop (mV)"),
     ("best_pkpk_mv", "Best peak-to-peak (mV)"),
+    ("best_pkpk_iteration", "Best peak-to-peak iteration"),
+    ("droop_at_best_pkpk_mv", "Droop at best peak-to-peak iteration (mV)"),
+    ("droop_reduction_at_best_pkpk_pct",
+     "Droop reduction at best peak-to-peak iteration (%)"),
     ("avg_guardband_power_mw", "Average guardband power (mW)"),
     ("avg_switching_power_mw", "Average switching power (mW)"),
 )
