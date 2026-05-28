@@ -247,6 +247,7 @@ int sc_main(int argc, char* argv[])
     metrics.global_code(dut.global_code);
     metrics.ctie_hi(dut.learned_ctie_hi);
     metrics.ctie_lo(dut.learned_ctie_lo);
+    metrics.learning_phase(dut.learned_phase);
     for (std::size_t i = 0; i < 9; ++i) {
         metrics.vout[i](dut.vout_de[i]);
         metrics.load_current[i](load_current[i]);
@@ -275,6 +276,7 @@ int sc_main(int argc, char* argv[])
         sca_util::sca_trace(tf, dut.learned_vos, "vos");
         sca_util::sca_trace(tf, dut.learned_ctie_hi, "ctie_hi");
         sca_util::sca_trace(tf, dut.learned_ctie_lo, "ctie_lo");
+        sca_util::sca_trace(tf, dut.learned_phase, "learning_phase");
         sca_util::sca_trace(tf, weight_sparsity, "weight_sparsity");
         sca_util::sca_trace(tf, input_toggle, "input_toggle");
 

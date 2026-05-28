@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 #include <systemc>
 
@@ -13,6 +14,16 @@
 // toggle. Each entry learns L-LDO comparator thresholds and EEC tie codes from
 // measured droop/overshoot over a window of system-clock cycles.
 SC_MODULE(learning_unit) {
+    enum TunePhase {
+        TUNE_VREFL = 0,
+        TUNE_VREFH = 1,
+        TUNE_CTIE_HI = 2,
+        TUNE_CTIE_LO = 3,
+        EVAL_DROOP = 4,
+        EVAL_OVERSHOOT = 5,
+        TUNE_DONE = 6
+    };
+
     struct Entry {
         double vref_low;
         double vref_high;
@@ -23,6 +34,21 @@ SC_MODULE(learning_unit) {
         double best_pkpk;
         double best_droop;
         double best_score;
+        TunePhase phase;
+        unsigned phase_iter;
+        int tune_direction;
+        bool phase_has_best;
+        bool tried_reverse;
+        double phase_best_score;
+        double phase_best_pkpk;
+        double phase_best_droop;
+        double phase_best_overshoot;
+        double saved_vref_low;
+        double saved_vref_high;
+        double saved_vdrp;
+        double saved_vos;
+        sc_dt::sc_uint<16> saved_ctie_hi;
+        sc_dt::sc_uint<16> saved_ctie_lo;
         bool learned;
 
         Entry()
@@ -35,6 +61,21 @@ SC_MODULE(learning_unit) {
               best_pkpk(1.0),
               best_droop(1.0),
               best_score(1.0),
+              phase(TUNE_VREFL),
+              phase_iter(0),
+              tune_direction(1),
+              phase_has_best(false),
+              tried_reverse(false),
+              phase_best_score(std::numeric_limits<double>::max()),
+              phase_best_pkpk(std::numeric_limits<double>::max()),
+              phase_best_droop(std::numeric_limits<double>::max()),
+              phase_best_overshoot(std::numeric_limits<double>::max()),
+              saved_vref_low(0.775),
+              saved_vref_high(0.825),
+              saved_vdrp(0.740),
+              saved_vos(0.860),
+              saved_ctie_hi(0xC000),
+              saved_ctie_lo(0x1000),
               learned(false)
         {}
     };
@@ -55,6 +96,7 @@ SC_MODULE(learning_unit) {
     sc_core::sc_out<double> vos;
     sc_core::sc_out<sc_dt::sc_uint<16>> ctie_hi;
     sc_core::sc_out<sc_dt::sc_uint<16>> ctie_lo;
+    sc_core::sc_out<unsigned> learning_phase;
 
     Entry table[kTableSize];
 
@@ -106,6 +148,134 @@ SC_MODULE(learning_unit) {
         return sc_dt::sc_uint<16>(next);
     }
 
+    static unsigned phase_code(TunePhase phase)
+    {
+        return static_cast<unsigned>(phase);
+    }
+
+    static TunePhase next_phase(TunePhase phase)
+    {
+        switch (phase) {
+        case TUNE_VREFL:
+            return TUNE_VREFH;
+        case TUNE_VREFH:
+            return TUNE_CTIE_HI;
+        case TUNE_CTIE_HI:
+            return TUNE_CTIE_LO;
+        case TUNE_CTIE_LO:
+            return EVAL_DROOP;
+        case EVAL_DROOP:
+            return EVAL_OVERSHOOT;
+        case EVAL_OVERSHOOT:
+        default:
+            return TUNE_DONE;
+        }
+    }
+
+    static bool code_phase(TunePhase phase)
+    {
+        return phase == TUNE_CTIE_HI || phase == TUNE_CTIE_LO;
+    }
+
+    static unsigned max_phase_iters(TunePhase phase)
+    {
+        switch (phase) {
+        case TUNE_VREFL:
+            return 5;
+        case TUNE_VREFH:
+            return 6;
+        case TUNE_CTIE_HI:
+        case TUNE_CTIE_LO:
+            return 8;
+        case EVAL_DROOP:
+        case EVAL_OVERSHOOT:
+            return 1;
+        case TUNE_DONE:
+        default:
+            return 0;
+        }
+    }
+
+    static double score_value(double droop, double overshoot,
+                              double target_droop,
+                              double target_overshoot)
+    {
+        const double pkpk = droop + overshoot;
+        const double droop_excess = std::max(0.0, droop - target_droop);
+        const double overshoot_excess =
+            std::max(0.0, overshoot - target_overshoot);
+        return pkpk + 2.0 * droop_excess + overshoot_excess;
+    }
+
+    static int phase_direction(TunePhase phase, double droop, double overshoot,
+                               double target_droop,
+                               double target_overshoot)
+    {
+        switch (phase) {
+        case TUNE_VREFL:
+            return 1;
+        case TUNE_VREFH:
+            return -1;
+        case TUNE_CTIE_HI:
+            return droop > target_droop ? 1 : -1;
+        case TUNE_CTIE_LO:
+            return overshoot > target_overshoot ? -1 : 1;
+        default:
+            return 0;
+        }
+    }
+
+    static void reset_phase_state(Entry& e, TunePhase phase, int direction)
+    {
+        e.phase = phase;
+        e.phase_iter = 0;
+        e.tune_direction = direction;
+        e.phase_has_best = false;
+        e.tried_reverse = false;
+        e.phase_best_score = std::numeric_limits<double>::max();
+        e.phase_best_pkpk = std::numeric_limits<double>::max();
+        e.phase_best_droop = std::numeric_limits<double>::max();
+        e.phase_best_overshoot = std::numeric_limits<double>::max();
+    }
+
+    static void reset_learning_state(Entry& e)
+    {
+        e.best_pkpk = 1.0;
+        e.best_droop = 1.0;
+        e.best_score = 1.0;
+        reset_phase_state(e, TUNE_VREFL, 1);
+        e.learned = false;
+    }
+
+    static void save_phase_best(Entry& e, double score, double pkpk,
+                                double droop, double overshoot)
+    {
+        e.phase_has_best = true;
+        e.phase_best_score = score;
+        e.phase_best_pkpk = pkpk;
+        e.phase_best_droop = droop;
+        e.phase_best_overshoot = overshoot;
+        e.saved_vref_low = e.vref_low;
+        e.saved_vref_high = e.vref_high;
+        e.saved_vdrp = e.vdrp;
+        e.saved_vos = e.vos;
+        e.saved_ctie_hi = e.ctie_hi;
+        e.saved_ctie_lo = e.ctie_lo;
+    }
+
+    static void restore_phase_best(Entry& e)
+    {
+        if (!e.phase_has_best)
+            return;
+
+        e.vref_low = e.saved_vref_low;
+        e.vref_high = e.saved_vref_high;
+        e.vdrp = e.saved_vdrp;
+        e.vos = e.saved_vos;
+        e.ctie_hi = e.saved_ctie_hi;
+        e.ctie_lo = e.saved_ctie_lo;
+    }
+
     void seed_table()
     {
         for (int s = 0; s < kBins; ++s) {
@@ -134,10 +304,7 @@ SC_MODULE(learning_unit) {
                     std::min<unsigned>(0xFFFFu, hi_code));
                 e.ctie_lo = sc_dt::sc_uint<16>(
                     std::min<unsigned>(0xFFFFu, lo_code));
-                e.best_pkpk = 1.0;
-                e.best_droop = 1.0;
-                e.best_score = 1.0;
-                e.learned = false;
+                reset_learning_state(e);
             }
         }
     }
@@ -151,6 +318,7 @@ SC_MODULE(learning_unit) {
         vos.write(e.vos);
         ctie_hi.write(e.ctie_hi);
         ctie_lo.write(e.ctie_lo);
+        learning_phase.write(phase_code(e.phase));
     }
 
     Entry disabled_entry() const
@@ -162,9 +330,8 @@ SC_MODULE(learning_unit) {
         e.vos = nominal_vref + 0.090;
         e.ctie_hi = sc_dt::sc_uint<16>(0x6800);
         e.ctie_lo = sc_dt::sc_uint<16>(0x1800);
-        e.best_pkpk = 1.0;
-        e.best_droop = 1.0;
-        e.best_score = 1.0;
+        reset_learning_state(e);
+        e.phase = TUNE_DONE;
         e.learned = false;
         return e;
     }
@@ -197,6 +364,72 @@ SC_MODULE(learning_unit) {
         }
     }
 
+    void update_detector_thresholds(Entry& e, double droop,
+                                    double overshoot,
+                                    double target_droop,
+                                    double target_overshoot)
+    {
+        e.vdrp = clamp_double(nominal_vref - std::max(target_droop, droop),
+                              nominal_vref - 0.160, nominal_vref - 0.004);
+        e.vos = clamp_double(nominal_vref + std::max(target_overshoot, overshoot),
+                             nominal_vref + 0.004, nominal_vref + 0.160);
+    }
+
+    void apply_phase_probe(Entry& e, double v_step, int code_step,
+                           double droop, double overshoot,
+                           double target_droop,
+                           double target_overshoot)
+    {
+        switch (e.phase) {
+        case TUNE_VREFL:
+            e.vref_low += v_step;
+            break;
+        case TUNE_VREFH:
+            e.vref_high -= v_step;
+            break;
+        case TUNE_CTIE_HI:
+            e.ctie_hi = add_code(e.ctie_hi, e.tune_direction * code_step);
+            break;
+        case TUNE_CTIE_LO:
+            e.ctie_lo = add_code(e.ctie_lo, e.tune_direction * code_step);
+            break;
+        case EVAL_DROOP:
+        case EVAL_OVERSHOOT:
+            update_detector_thresholds(e, droop, overshoot,
+                                       target_droop, target_overshoot);
+            break;
+        case TUNE_DONE:
+        default:
+            break;
+        }
+
+        enforce_window(e);
+    }
+
+    void start_next_phase(Entry& e, TunePhase next, double score,
+                          double pkpk, double droop, double overshoot,
+                          double target_droop, double target_overshoot,
+                          double v_step, int code_step)
+    {
+        reset_phase_state(
+            e, next,
+            phase_direction(next, droop, overshoot,
+                            target_droop, target_overshoot));
+
+        if (next == TUNE_DONE)
+            return;
+
+        if (next == EVAL_DROOP || next == EVAL_OVERSHOOT) {
+            save_phase_best(e, score, pkpk, droop, overshoot);
+            return;
+        }
+
+        save_phase_best(e, score, pkpk, droop, overshoot);
+        apply_phase_probe(e, v_step, code_step, droop, overshoot,
+                          target_droop, target_overshoot);
+        ++e.phase_iter;
+    }
+
     void adapt_entry(Entry& e)
     {
         const double sparsity = normalize_ratio(weight_sparsity.read());
@@ -211,22 +444,12 @@ SC_MODULE(learning_unit) {
         const double target_overshoot = 0.010 + 0.015 * density;
         const double v_step = learn_step_v * (0.5 + density);
         const int code_step = static_cast<int>(
-            learn_step_code * (1u + static_cast<unsigned>(std::lround(3.0 * density))));
+            learn_step_code * (1u + static_cast<unsigned>(
+                std::lround(3.0 * density))));
+        const double score =
+            score_value(droop, overshoot, target_droop, target_overshoot);
 
-        const double droop_excess = std::max(0.0, droop - target_droop);
-        const double overshoot_excess = std::max(0.0, overshoot - target_overshoot);
-        const double score = pkpk + 2.0 * droop_excess + overshoot_excess;
-
-        const bool was_learned = e.learned;
-        const bool droop_regressed =
-            was_learned && droop > target_droop &&
-            droop > e.best_droop + 0.012;
-        const bool pkpk_regressed =
-            was_learned && pkpk > e.best_pkpk + 0.018 &&
-            score > e.best_score + 0.012;
-        const bool rollback = pkpk_regressed && !droop_regressed;
-
-        if (!was_learned || score < e.best_score) {
+        if (!e.learned || score < e.best_score) {
             e.best_score = score;
             e.best_pkpk = pkpk;
             e.best_droop = droop;
@@ -239,38 +462,74 @@ SC_MODULE(learning_unit) {
             e.learned = true;
         }
 
-        if (rollback) {
-            // Roll back only when peak-to-peak worsens without a droop need.
-            e.vref_low -= 2.0 * v_step;
-            e.vref_high += 2.0 * v_step;
-            e.ctie_hi = add_code(e.ctie_hi, -code_step);
-            e.ctie_lo = add_code(e.ctie_lo, code_step);
-        } else {
-            if (droop > target_droop) {
-                const double droop_gain = droop_regressed ? 1.5 : 1.0;
-                e.vref_low += droop_gain * v_step;
-                e.ctie_hi = add_code(
-                    e.ctie_hi,
-                    static_cast<int>(std::lround(droop_gain * code_step)));
-            } else {
-                e.vref_low -= 0.25 * v_step;
-                e.ctie_hi = add_code(e.ctie_hi, -code_step / 4);
-            }
+        if (e.phase == TUNE_DONE)
+            return;
 
-            if (overshoot > target_overshoot) {
-                e.vref_high -= v_step;
-                e.ctie_lo = add_code(e.ctie_lo, -code_step);
-            } else {
-                e.vref_high += 0.25 * v_step;
-                e.ctie_lo = add_code(e.ctie_lo, code_step / 4);
-            }
+        if (e.phase == EVAL_DROOP) {
+            update_detector_thresholds(e, droop, overshoot,
+                                       target_droop, target_overshoot);
+            start_next_phase(e, EVAL_OVERSHOOT, score, pkpk, droop, overshoot,
+                             target_droop, target_overshoot,
+                             v_step, code_step);
+            return;
         }
 
-        enforce_window(e);
-        e.vdrp = clamp_double(nominal_vref - std::max(target_droop, droop),
-                              nominal_vref - 0.160, nominal_vref - 0.004);
-        e.vos = clamp_double(nominal_vref + std::max(target_overshoot, overshoot),
-                             nominal_vref + 0.004, nominal_vref + 0.160);
+        if (e.phase == EVAL_OVERSHOOT) {
+            update_detector_thresholds(e, droop, overshoot,
+                                       target_droop, target_overshoot);
+            start_next_phase(e, TUNE_DONE, score, pkpk, droop, overshoot,
+                             target_droop, target_overshoot,
+                             v_step, code_step);
+            return;
+        }
+
+        const double improve_margin = 0.0005;
+        const bool improved =
+            !e.phase_has_best || score < e.phase_best_score - improve_margin;
+        if (improved)
+            save_phase_best(e, score, pkpk, droop, overshoot);
+
+        const bool worse =
+            e.phase_has_best && !improved &&
+            score > e.phase_best_score + improve_margin;
+
+        if (worse && code_phase(e.phase) && !e.tried_reverse &&
+            e.phase_iter > 0) {
+            restore_phase_best(e);
+            e.tune_direction = -e.tune_direction;
+            e.tried_reverse = true;
+            apply_phase_probe(e, v_step, code_step, droop, overshoot,
+                              target_droop, target_overshoot);
+            ++e.phase_iter;
+            return;
+        }
+
+        const bool maxed =
+            max_phase_iters(e.phase) > 0 &&
+            e.phase_iter >= max_phase_iters(e.phase);
+        const bool phase_complete = (worse && e.phase_iter > 0) || maxed;
+        if (phase_complete) {
+            const double best_score =
+                e.phase_has_best ? e.phase_best_score : score;
+            const double best_pkpk =
+                e.phase_has_best ? e.phase_best_pkpk : pkpk;
+            const double best_droop =
+                e.phase_has_best ? e.phase_best_droop : droop;
+            const double best_overshoot =
+                e.phase_has_best ? e.phase_best_overshoot : overshoot;
+            const TunePhase next = next_phase(e.phase);
+
+            restore_phase_best(e);
+            start_next_phase(e, next, best_score, best_pkpk,
+                             best_droop, best_overshoot,
+                             target_droop, target_overshoot,
+                             v_step, code_step);
+            return;
+        }
+
+        apply_phase_probe(e, v_step, code_step, droop, overshoot,
+                          target_droop, target_overshoot);
+        ++e.phase_iter;
     }
 
     void learn_process()
@@ -341,6 +600,7 @@ SC_MODULE(learning_unit) {
           vos("vos"),
           ctie_hi("ctie_hi"),
           ctie_lo("ctie_lo"),
+          learning_phase("learning_phase"),
           nominal_vref(nominal_vref_),
           max_window(0.080),
           min_window(0.006),

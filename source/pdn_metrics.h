@@ -290,6 +290,7 @@ SC_MODULE(pdn_paper_monitor) {
     sc_core::sc_in<sc_dt::sc_uint<16>> global_code;
     sc_core::sc_in<sc_dt::sc_uint<16>> ctie_hi;
     sc_core::sc_in<sc_dt::sc_uint<16>> ctie_lo;
+    sc_core::sc_in<unsigned> learning_phase;
     sc_core::sc_vector<sc_core::sc_in<sc_dt::sc_uint<16>>> local_code;
     sc_core::sc_vector<sc_core::sc_in<sc_dt::sc_uint<16>>> code_sum;
     sc_core::sc_vector<sc_core::sc_in<sc_dt::sc_uint<16>>> gate_word;
@@ -583,6 +584,7 @@ SC_MODULE(pdn_paper_monitor) {
         learning_csv.open("pdn_learning_metrics.csv", std::ios::out);
         learning_csv
             << "scenario,sparsity_pct,toggle_pct,iteration,time_ns,mode,"
+            << "learning_phase,learning_phase_name,"
             << "vmin_mv,vmax_mv,droop_mv,overshoot_mv,pkpk_mv,"
             << "baseline_droop_mv,baseline_pkpk_mv,droop_reduction_pct,pkpk_reduction_pct,"
             << "avg_load_ma,peak_load_ma,delta_load_ma,event_latency_ps,control_latency_ps,settle_ns,"
@@ -600,6 +602,28 @@ SC_MODULE(pdn_paper_monitor) {
         mode += learning_enabled ? "+learning" : "+no_learning";
         mode += balance_enabled ? "+balance" : "+no_balance";
         return mode;
+    }
+
+    std::string learning_phase_string() const
+    {
+        switch (learning_phase.read()) {
+        case 0:
+            return "tune_vrefl";
+        case 1:
+            return "tune_vrefh";
+        case 2:
+            return "tune_ctie_hi";
+        case 3:
+            return "tune_ctie_lo";
+        case 4:
+            return "eval_droop";
+        case 5:
+            return "eval_overshoot";
+        case 6:
+            return "done";
+        default:
+            return "unknown";
+        }
     }
 
     void write_learning_row(int scenario, unsigned iteration,
@@ -639,6 +663,8 @@ SC_MODULE(pdn_paper_monitor) {
                      << iteration << ","
                      << sc_core::sc_time_stamp().to_seconds() * 1.0e9 << ","
                      << mode_string() << ","
+                     << learning_phase.read() << ","
+                     << learning_phase_string() << ","
                      << win_min_vout * 1.0e3 << ","
                      << win_max_vout * 1.0e3 << ","
                      << droop_mv << ","
@@ -1158,6 +1184,7 @@ SC_MODULE(pdn_paper_monitor) {
           global_code("global_code"),
           ctie_hi("ctie_hi"),
           ctie_lo("ctie_lo"),
+          learning_phase("learning_phase"),
           local_code("local_code", num_ldos_),
           code_sum("code_sum", num_ldos_),
           gate_word("gate_word", num_ldos_),

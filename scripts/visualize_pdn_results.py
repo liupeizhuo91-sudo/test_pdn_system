@@ -44,6 +44,16 @@ LEARNING_METRICS = (
     ("vos_mv", "VOS"),
 )
 
+PHASE_LABELS = (
+    "VREFL",
+    "VREFH",
+    "CTieHi",
+    "CTieLo",
+    "VDRP",
+    "VOS",
+    "Done",
+)
+
 CASE_SUMMARY_METRICS = (
     ("avg_pin_mw", "Average input power (mW)"),
     ("avg_efficiency_pct", "Average efficiency (%)"),
@@ -150,6 +160,25 @@ def save_line_plot(plt, out_path, rows, x_key, series, title, ylabel):
 
     set_common_style(ax, title, x_key, ylabel)
     ax.legend(loc="best", frameon=False)
+    fig.tight_layout()
+    fig.savefig(out_path)
+    plt.close(fig)
+    return True
+
+
+def save_phase_plot(plt, out_path, rows, title):
+    rows = sorted_by_float(rows, "iteration")
+    x = finite_values(rows, "iteration")
+    y = [to_float(row, "learning_phase") for row in rows]
+    if not x or not any(math.isfinite(value) for value in y):
+        return False
+
+    fig, ax = plt.subplots(figsize=(8.5, 3.8))
+    ax.step(x, y, where="post", linewidth=1.8)
+    set_common_style(ax, title, "iteration", "learning phase")
+    ax.set_yticks(range(len(PHASE_LABELS)))
+    ax.set_yticklabels(PHASE_LABELS)
+    ax.set_ylim(-0.5, len(PHASE_LABELS) - 0.5)
     fig.tight_layout()
     fig.savefig(out_path)
     plt.close(fig)
@@ -377,6 +406,14 @@ def visualize(results_dir, out_dir, image_format, dpi):
                 f"{case} / {scenario}: learned voltage controls", "mV",
             ):
                 add_gallery_item(gallery, f"{case} / {scenario}: learning controls",
+                                 path, out_dir)
+
+            path = out_dir / f"{base_name}_learning_phase.{image_format}"
+            if save_phase_plot(
+                plt, path, scenario_rows,
+                f"{case} / {scenario}: learning phase",
+            ):
+                add_gallery_item(gallery, f"{case} / {scenario}: learning phase",
                                  path, out_dir)
 
     summary_rows = read_rows(results_dir / "case_summary.csv")

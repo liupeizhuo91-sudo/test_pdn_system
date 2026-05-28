@@ -58,6 +58,7 @@ SC_MODULE(distributed_pdn_system) {
     sc_core::sc_signal<double> learned_vos{"learned_vos"};
     sc_core::sc_signal<sc_dt::sc_uint<16>> learned_ctie_hi{"learned_ctie_hi"};
     sc_core::sc_signal<sc_dt::sc_uint<16>> learned_ctie_lo{"learned_ctie_lo"};
+    sc_core::sc_signal<unsigned> learned_phase{"learned_phase"};
 
     sca_tdf::sca_signal<double> vref_tdf{"vref_tdf"};
     sca_tdf::sca_signal<double> vrefh_tdf{"vrefh_tdf"};
@@ -228,6 +229,7 @@ SC_MODULE(distributed_pdn_system) {
         learner.vos(learned_vos);
         learner.ctie_hi(learned_ctie_hi);
         learner.ctie_lo(learned_ctie_lo);
+        learner.learning_phase(learned_phase);
 
         vref_bridge.inp(learned_vref);
         vref_bridge.outp(vref_tdf);
