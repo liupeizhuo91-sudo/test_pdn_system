@@ -49,6 +49,8 @@ SC_MODULE(distributed_pdn_system) {
     sc_core::sc_vector<sc_core::sc_signal<double>> vout_de;
     sc_core::sc_vector<sca_tdf::sca_signal<double>> vout_tdf;
     sc_core::sc_signal<double> avg_vout_de{"avg_vout_de"};
+    sc_core::sc_signal<double> min_vout_de{"min_vout_de"};
+    sc_core::sc_signal<double> max_vout_de{"max_vout_de"};
     sca_tdf::sca_signal<double> avg_vout_tdf{"avg_vout_tdf"};
 
     sc_core::sc_signal<double> learned_vref{"learned_vref"};
@@ -93,10 +95,19 @@ SC_MODULE(distributed_pdn_system) {
     void update_avg_vout_de()
     {
         double sum = 0.0;
+        double min_vout = 10.0;
+        double max_vout = -10.0;
         for (std::size_t i = 0; i < num_ldos; ++i)
-            sum += vout_de[i].read();
+        {
+            const double v = vout_de[i].read();
+            sum += v;
+            min_vout = std::min(min_vout, v);
+            max_vout = std::max(max_vout, v);
+        }
 
         avg_vout_de.write(num_ldos == 0 ? 0.0 : sum / static_cast<double>(num_ldos));
+        min_vout_de.write(num_ldos == 0 ? 0.0 : min_vout);
+        max_vout_de.write(num_ldos == 0 ? 0.0 : max_vout);
     }
 
 
@@ -191,7 +202,7 @@ SC_MODULE(distributed_pdn_system) {
           global_code_per_ldo("global_code_per_ldo", num_ldos_),
           balance_adjust("balance_adjust", num_ldos_),
           global_loop("global_loop", num_ldos_, 1.0e-3),
-          learner("learner", nominal_vref_, 256, 1.0e-3, 32,
+          learner("learner", nominal_vref_, 256, 1.0e-3, 4096,
                   learning_warmup_cycles_),
           balancer("balancer", num_ldos_, 512, 0.25, 0.50),
           avg_tdf("avg_tdf", num_ldos_, sc_core::sc_time(100.0, sc_core::SC_PS)),
@@ -217,9 +228,12 @@ SC_MODULE(distributed_pdn_system) {
 
         bind_grid();
 
+        global_loop.require_all_ldos_enabled = false;
+
         learner.clk(clk_sys);
         learner.rst_n(rst_n);
-        learner.vout(avg_vout_de);
+        learner.vout_min(min_vout_de);
+        learner.vout_max(max_vout_de);
         learner.weight_sparsity(weight_sparsity);
         learner.input_toggle(input_toggle);
         learner.vref(learned_vref);

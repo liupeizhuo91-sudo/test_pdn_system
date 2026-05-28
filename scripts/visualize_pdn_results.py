@@ -47,10 +47,8 @@ LEARNING_METRICS = (
 PHASE_LABELS = (
     "VREFL",
     "VREFH",
-    "CTieHi",
     "CTieLo",
-    "VDRP",
-    "VOS",
+    "CTieHi",
     "Done",
 )
 

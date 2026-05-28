@@ -586,6 +586,7 @@ SC_MODULE(pdn_paper_monitor) {
             << "scenario,sparsity_pct,toggle_pct,iteration,time_ns,mode,"
             << "learning_phase,learning_phase_name,"
             << "vmin_mv,vmax_mv,droop_mv,overshoot_mv,pkpk_mv,"
+            << "droop_event_mv,overshoot_event_mv,"
             << "baseline_droop_mv,baseline_pkpk_mv,droop_reduction_pct,pkpk_reduction_pct,"
             << "avg_load_ma,peak_load_ma,delta_load_ma,event_latency_ps,control_latency_ps,settle_ns,"
             << "vrefh_mv,vrefl_mv,vdrp_mv,vos_mv,ctie_hi,ctie_lo,global_code,"
@@ -612,14 +613,10 @@ SC_MODULE(pdn_paper_monitor) {
         case 1:
             return "tune_vrefh";
         case 2:
-            return "tune_ctie_hi";
-        case 3:
             return "tune_ctie_lo";
+        case 3:
+            return "tune_ctie_hi";
         case 4:
-            return "eval_droop";
-        case 5:
-            return "eval_overshoot";
-        case 6:
             return "done";
         default:
             return "unknown";
@@ -628,7 +625,8 @@ SC_MODULE(pdn_paper_monitor) {
 
     void write_learning_row(int scenario, unsigned iteration,
                             double droop_mv, double overshoot_mv,
-                            double pkpk_mv, double avg_load_ma,
+                            double pkpk_mv, double droop_event_mv,
+                            double overshoot_event_mv, double avg_load_ma,
                             double pin_mw, double pout_mw,
                             double efficiency_pct,
                             double control_power_mw,
@@ -670,6 +668,8 @@ SC_MODULE(pdn_paper_monitor) {
                      << droop_mv << ","
                      << overshoot_mv << ","
                      << pkpk_mv << ","
+                     << droop_event_mv << ","
+                     << overshoot_event_mv << ","
                      << report.baseline_droop_mv << ","
                      << report.baseline_pkpk_mv << ","
                      << droop_reduction << ","
@@ -713,7 +713,12 @@ SC_MODULE(pdn_paper_monitor) {
             std::max(0.0, nominal_vref - win_min_vout) * 1.0e3;
         const double overshoot_mv =
             std::max(0.0, win_max_vout - nominal_vref) * 1.0e3;
-        const double pkpk_mv = droop_mv + overshoot_mv;
+        const double pkpk_mv =
+            std::max(0.0, win_max_vout - win_min_vout) * 1.0e3;
+        const double droop_event_mv =
+            std::max(0.0, vrefl.read() - win_min_vout) * 1.0e3;
+        const double overshoot_event_mv =
+            std::max(0.0, win_max_vout - vrefh.read()) * 1.0e3;
         const double avg_load_ma =
             win_load_sum / static_cast<double>(sample_count) * 1.0e3;
         const double pin_mw =
@@ -789,7 +794,8 @@ SC_MODULE(pdn_paper_monitor) {
             report.best_current_stddev_ma = avg_stddev_ma;
 
         write_learning_row(active_scenario, report.iteration, droop_mv,
-                            overshoot_mv, pkpk_mv, avg_load_ma, pin_mw,
+                           overshoot_mv, pkpk_mv, droop_event_mv,
+                           overshoot_event_mv, avg_load_ma, pin_mw,
                            pout_mw, efficiency_pct, control_power_mw,
                            guardband_power_mw, switching_power_mw);
         reset_window();

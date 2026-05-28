@@ -12,6 +12,7 @@
 SC_MODULE(g_ldo) {
     double ki;            // Integral gain, scaled to the 16-bit control range.
     std::size_t num_ldos; // Number of local LDO enable inputs.
+    bool require_all_ldos_enabled;
 
     // Digital side ports.
     sc_core::sc_vector<sc_core::sc_in<bool>> ldo_en;
@@ -35,6 +36,11 @@ SC_MODULE(g_ldo) {
 
     void generate_enable()
     {
+        if (!require_all_ldos_enabled) {
+            all_ldos_en.write(true);
+            return;
+        }
+
         bool all_enabled = true;
         for (std::size_t i = 0; i < ldo_en.size(); ++i) {
             if (!ldo_en[i].read()) {
@@ -73,6 +79,7 @@ SC_MODULE(g_ldo) {
         : sc_module(name_),
         ki(ki_),
         num_ldos(num_ldos_),
+        require_all_ldos_enabled(true),
         ldo_en("ldo_en", num_ldos_),
         clk_sys("clk_sys"),
         rst_n("rst_n"),
