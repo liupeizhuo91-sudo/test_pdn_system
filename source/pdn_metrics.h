@@ -23,6 +23,7 @@ SC_MODULE(paper_workload) {
     double sparse_activity_gain;
     double burst_low_ratio;
     unsigned long long cycle;
+    int forced_scenario_index;
 
     sc_core::sc_in<bool> clk;
     sc_core::sc_in<bool> rst_n;
@@ -43,6 +44,9 @@ SC_MODULE(paper_workload) {
 
     int scenario_index() const
     {
+        if (forced_scenario_index >= 0)
+            return forced_scenario_index;
+
         const unsigned long long scenario_cycles =
             static_cast<unsigned long long>(scenario_windows) *
             static_cast<unsigned long long>(cycles_per_window);
@@ -52,7 +56,7 @@ SC_MODULE(paper_workload) {
         const unsigned long long effective_cycle =
             cycle >= warmup_cycles ? cycle - warmup_cycles : 0ULL;
         const unsigned long long index = effective_cycle / scenario_cycles;
-        return static_cast<int>(std::min<unsigned long long>(index, 3ULL));
+        return static_cast<int>(std::min<unsigned long long>(index, 5ULL));
     }
 
     void scenario_values(int index, double& sparsity, double& toggle) const
@@ -61,9 +65,15 @@ SC_MODULE(paper_workload) {
             sparsity = 0.10;
             toggle = 0.75;
         } else if (index == 1) {
+            sparsity = 0.30;
+            toggle = 0.625;
+        } else if (index == 2) {
             sparsity = 0.50;
             toggle = 0.50;
-        } else if (index == 2) {
+        } else if (index == 3) {
+            sparsity = 0.70;
+            toggle = 0.375;
+        } else if (index == 4) {
             sparsity = 0.90;
             toggle = 0.25;
         } else {
@@ -77,11 +87,14 @@ SC_MODULE(paper_workload) {
         const unsigned long long scenario_cycles =
             static_cast<unsigned long long>(scenario_windows) *
             static_cast<unsigned long long>(cycles_per_window);
+        const bool forced_step = forced_scenario_index == 5;
         const unsigned long long step_start =
+            forced_step ?
+            static_cast<unsigned long long>(warmup_cycles) :
             static_cast<unsigned long long>(warmup_cycles) +
-            3ULL * scenario_cycles;
+            5ULL * scenario_cycles;
         const unsigned long long local_cycle =
-            cycle > step_start ? cycle - step_start : 0ULL;
+            cycle >= step_start ? cycle - step_start : 0ULL;
 
         double total_current = 116.0e-3;
         if (local_cycle >= 64ULL && local_cycle < 320ULL)
@@ -108,7 +121,7 @@ SC_MODULE(paper_workload) {
         double sparsity = 0.10;
         double toggle = 0.75;
         const int index = scenario_index();
-        if (index == 3) {
+        if (index == 5) {
             write_load_step();
             return;
         }
@@ -124,9 +137,9 @@ SC_MODULE(paper_workload) {
         const double burst = burst_high ? 1.0 : burst_low_ratio;
         const double density = std::max(0.0, 1.0 - sparsity) * toggle;
         double scenario_gain = 1.0;
-        if (index == 1)
+        if (index == 1 || index == 2)
             scenario_gain = medium_activity_gain;
-        else if (index == 2)
+        else if (index == 3 || index == 4)
             scenario_gain = sparse_activity_gain;
 
         for (std::size_t i = 0; i < num_clusters; ++i) {
@@ -171,6 +184,7 @@ SC_MODULE(paper_workload) {
           sparse_activity_gain(sparse_activity_gain_),
           burst_low_ratio(burst_low_ratio_),
           cycle(0),
+          forced_scenario_index(-1),
           clk("clk"),
           rst_n("rst_n"),
           load_current("load_current", num_clusters_),
@@ -390,18 +404,22 @@ SC_MODULE(pdn_paper_monitor) {
         const double toggle = input_toggle.read();
         if (std::fabs(sparsity - 0.10) < 0.05 && std::fabs(toggle - 0.75) < 0.10)
             return 0;
-        if (std::fabs(sparsity - 0.50) < 0.10 && std::fabs(toggle - 0.50) < 0.10)
+        if (std::fabs(sparsity - 0.30) < 0.05 && std::fabs(toggle - 0.625) < 0.10)
             return 1;
-        if (std::fabs(sparsity - 0.90) < 0.05 && std::fabs(toggle - 0.25) < 0.10)
+        if (std::fabs(sparsity - 0.50) < 0.10 && std::fabs(toggle - 0.50) < 0.10)
             return 2;
-        if (std::fabs(sparsity - 0.00) < 0.05 && std::fabs(toggle - 1.00) < 0.10)
+        if (std::fabs(sparsity - 0.70) < 0.05 && std::fabs(toggle - 0.375) < 0.10)
             return 3;
-        return 3;
+        if (std::fabs(sparsity - 0.90) < 0.05 && std::fabs(toggle - 0.25) < 0.10)
+            return 4;
+        if (std::fabs(sparsity - 0.00) < 0.05 && std::fabs(toggle - 1.00) < 0.10)
+            return 5;
+        return 5;
     }
 
     void initialize_reports()
     {
-        reports.assign(4, ScenarioReport());
+        reports.assign(6, ScenarioReport());
 
         reports[0].name = "dense_10pct_75pct";
         reports[0].paper_baseline_droop_mv = 128.0;
@@ -409,21 +427,33 @@ SC_MODULE(pdn_paper_monitor) {
         reports[0].paper_reduction_pct = 49.0;
         reports[0].paper_best_iter = 29;
 
-        reports[1].name = "medium_50pct_50pct";
-        reports[1].paper_baseline_droop_mv = 104.0;
-        reports[1].paper_best_droop_mv = 48.0;
-        reports[1].paper_reduction_pct = 53.8;
-        reports[1].paper_best_iter = 23;
+        reports[1].name = "dense_mid_30pct_62p5pct";
+        reports[1].paper_baseline_droop_mv = 116.0;
+        reports[1].paper_best_droop_mv = 56.65;
+        reports[1].paper_reduction_pct = 51.2;
+        reports[1].paper_best_iter = 26;
 
-        reports[2].name = "sparse_90pct_25pct";
-        reports[2].paper_baseline_droop_mv = 80.0;
-        reports[2].paper_best_droop_mv = 23.0;
-        reports[2].paper_reduction_pct = 71.3;
+        reports[2].name = "medium_50pct_50pct";
+        reports[2].paper_baseline_droop_mv = 104.0;
+        reports[2].paper_best_droop_mv = 48.0;
+        reports[2].paper_reduction_pct = 53.8;
         reports[2].paper_best_iter = 23;
 
-        reports[3].name = "load_step_116_506_330ma";
-        reports[3].paper_baseline_droop_mv = 35.0;
-        reports[3].paper_best_droop_mv = 15.7;
+        reports[3].name = "sparse_mid_70pct_37p5pct";
+        reports[3].paper_baseline_droop_mv = 92.0;
+        reports[3].paper_best_droop_mv = 35.5;
+        reports[3].paper_reduction_pct = 61.4;
+        reports[3].paper_best_iter = 23;
+
+        reports[4].name = "sparse_90pct_25pct";
+        reports[4].paper_baseline_droop_mv = 80.0;
+        reports[4].paper_best_droop_mv = 23.0;
+        reports[4].paper_reduction_pct = 71.3;
+        reports[4].paper_best_iter = 23;
+
+        reports[5].name = "load_step_116_506_330ma";
+        reports[5].paper_baseline_droop_mv = 35.0;
+        reports[5].paper_best_droop_mv = 15.7;
     }
 
     void reset_window()
@@ -613,9 +643,9 @@ SC_MODULE(pdn_paper_monitor) {
         case 1:
             return "tune_vrefh";
         case 2:
-            return "tune_ctie_lo";
-        case 3:
             return "tune_ctie_hi";
+        case 3:
+            return "tune_ctie_lo";
         case 4:
             return "done";
         default:
@@ -1034,7 +1064,7 @@ SC_MODULE(pdn_paper_monitor) {
         comparison_csv.open("pdn_paper_comparison.csv", std::ios::out);
         comparison_csv << "metric,scenario,paper_value,model_value,unit,note\n";
 
-        for (std::size_t i = 0; i < 3 && i < reports.size(); ++i) {
+        for (std::size_t i = 0; i < 5 && i < reports.size(); ++i) {
             const ScenarioReport& r = reports[i];
             const bool measured = r.seen && r.measured_windows > 0;
             const bool has_best_droop =
@@ -1125,15 +1155,15 @@ SC_MODULE(pdn_paper_monitor) {
             dense_measured, reports[0].baseline_pkpk_mv, "mV",
             "First measured dense window after warm-up; use --disable-learning for pure w/o-learning mode");
         const bool step_measured =
-            reports.size() > 3 && reports[3].seen && reports[3].measured_windows > 0;
+            reports.size() > 5 && reports[5].seen && reports[5].measured_windows > 0;
         write_comparison_metric_optional("resistor_step_undershoot", "standalone_step",
                                          true, 35.0,
-                                         step_measured, reports[3].max_droop_mv,
+                                         step_measured, reports[5].max_droop_mv,
                                          "mV",
                                          "Model step phase uses total load 116mA->506mA");
         write_comparison_metric_optional("resistor_step_overshoot", "standalone_step",
                                          true, 15.7,
-                                         step_measured, reports[3].max_overshoot_mv,
+                                         step_measured, reports[5].max_overshoot_mv,
                                          "mV",
                                          "Model step phase uses total load 506mA->330mA");
         write_comparison_metric_optional("energy_saving_min", "overall_ai",

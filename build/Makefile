@@ -5,12 +5,17 @@ PYTHON ?= python3
 RESULTS_DIR ?= results
 RUN_COMMON_ARGS ?= --no-trace
 RUN_ENV = LD_LIBRARY_PATH=${SYSTEMC_AMS_HOME}/lib-linux64:${SYSTEMC_HOME}/lib-linux64:$$$$LD_LIBRARY_PATH
+AI_SCENARIOS ?= dense_10pct_75pct dense_mid_30pct_62p5pct medium_50pct_50pct sparse_mid_70pct_37p5pct sparse_90pct_25pct
+STEP_SCENARIO ?= load_step_116_506_330ma
+SCENARIOS ?= $(AI_SCENARIOS) $(STEP_SCENARIO)
 PERF_VNOM_V ?= 0.8
 PERF_VTH_V ?= 0.35
 PERF_ALPHA ?= 1.3
 PERF_DROOP_PERCENTILE ?= 95.0
 PERF_OVERSHOOT_ALLOWANCE_MV ?= 10.0
 PERF_OVERSHOOT_PENALTY ?= 1.0
+PERF_NOMINAL_TOPS ?= 4.2
+SUMMARY_WINDOW_POLICY ?= sim_best
 
 # Compiler and flags
 CXX = g++
@@ -46,16 +51,29 @@ run-fast: $(TARGET)
 define RUN_CASE
 run-$(1): $(TARGET)
 	@echo "Running case $(1): $(2)"
+	@rm -rf $(RESULTS_DIR)/$(1)
 	@mkdir -p $(RESULTS_DIR)/$(1)
-	@rm -f pdn_learning_metrics.csv pdn_paper_comparison.csv waveform_pdn_system.vcd
-	@$(RUN_ENV) ./$(TARGET) $(RUN_COMMON_ARGS) $(2)
-	@cp pdn_learning_metrics.csv $(RESULTS_DIR)/$(1)/
-	@cp pdn_paper_comparison.csv $(RESULTS_DIR)/$(1)/
-	@if [ -f waveform_pdn_system.vcd ]; then cp waveform_pdn_system.vcd $(RESULTS_DIR)/$(1)/; fi
+	@first=1; \
+	for scenario in $(SCENARIOS); do \
+		echo "  scenario $$$$scenario"; \
+		mkdir -p $(RESULTS_DIR)/$(1)/$$$$scenario; \
+		rm -f pdn_learning_metrics.csv pdn_paper_comparison.csv waveform_pdn_system.vcd; \
+		$(RUN_ENV) ./$(TARGET) $(RUN_COMMON_ARGS) $(2) --scenario=$$$$scenario; \
+		cp pdn_learning_metrics.csv $(RESULTS_DIR)/$(1)/$$$$scenario/; \
+		cp pdn_paper_comparison.csv $(RESULTS_DIR)/$(1)/$$$$scenario/; \
+		cp pdn_paper_comparison.csv $(RESULTS_DIR)/$(1)/pdn_paper_comparison.csv; \
+		if [ $$$$first -eq 1 ]; then \
+			cp pdn_learning_metrics.csv $(RESULTS_DIR)/$(1)/pdn_learning_metrics.csv; \
+			first=0; \
+		else \
+			tail -n +2 pdn_learning_metrics.csv >> $(RESULTS_DIR)/$(1)/pdn_learning_metrics.csv; \
+		fi; \
+		if [ -f waveform_pdn_system.vcd ]; then cp waveform_pdn_system.vcd $(RESULTS_DIR)/$(1)/$$$$scenario/; fi; \
+	done
 endef
 
 $(eval $(call RUN_CASE,full,))
-$(eval $(call RUN_CASE,no_learning,--disable-learning))
+$(eval $(call RUN_CASE,no_learning,--disable-learning --paper-no-learning-profile))
 $(eval $(call RUN_CASE,no_eec,--disable-eec))
 $(eval $(call RUN_CASE,no_balance,--disable-balance))
 $(eval $(call RUN_CASE,baseline_all_off,--disable-learning --disable-eec --disable-balance))
@@ -68,6 +86,8 @@ summarize:
 		--vnom-v $(PERF_VNOM_V) \
 		--vth-v $(PERF_VTH_V) \
 		--alpha $(PERF_ALPHA) \
+		--nominal-tops $(PERF_NOMINAL_TOPS) \
+		--window-policy $(SUMMARY_WINDOW_POLICY) \
 		--droop-percentile $(PERF_DROOP_PERCENTILE) \
 		--overshoot-allowance-mv $(PERF_OVERSHOOT_ALLOWANCE_MV) \
 		--overshoot-penalty $(PERF_OVERSHOOT_PENALTY)

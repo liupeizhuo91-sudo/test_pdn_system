@@ -3,6 +3,7 @@
 #define DISTRIBUTED_PDN_SYSTEM_H
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstddef>
 #include <vector>
@@ -26,6 +27,7 @@ SC_MODULE(distributed_pdn_system) {
     double grid_resistance;
     double local_cout;
     double grid_decap;
+    double nominal_vref;
 
     sc_core::sc_in<bool> clk_sys;
     sc_core::sc_in<bool> rst_n;
@@ -92,6 +94,31 @@ SC_MODULE(distributed_pdn_system) {
         return sc_dt::sc_uint<16>(static_cast<unsigned>(next));
     }
 
+    static double normalize_ratio(double value)
+    {
+        const double ratio = value > 1.0 ? value / 100.0 : value;
+        return std::max(0.0, std::min(1.0, ratio));
+    }
+
+    unsigned anti_windup_backoff_code() const
+    {
+        if (!learner.enabled)
+            return 0u;
+
+        const double sparsity = normalize_ratio(weight_sparsity.read());
+        if (sparsity < 0.60)
+            return 0u;
+
+        const double ref = learned_vref.read() > 0.0 ?
+                           learned_vref.read() : nominal_vref;
+        const double overshoot = std::max(0.0, max_vout_de.read() - ref);
+        if (overshoot <= 0.012)
+            return 0u;
+
+        const double severity = std::min(1.0, (overshoot - 0.012) / 0.025);
+        return static_cast<unsigned>(std::lround(4096.0 + 12288.0 * severity));
+    }
+
     void update_avg_vout_de()
     {
         double sum = 0.0;
@@ -113,9 +140,16 @@ SC_MODULE(distributed_pdn_system) {
 
     void update_global_distribution()
     {
+        sc_dt::sc_uint<16> base_code = global_code.read();
+        const unsigned backoff = anti_windup_backoff_code();
+        if (backoff > 0u) {
+            sc_dt::sc_int<17> delta = -static_cast<int>(backoff);
+            base_code = add_signed_code(base_code, delta);
+        }
+
         for (std::size_t i = 0; i < num_ldos; ++i) {
             global_code_per_ldo[i].write(
-                add_signed_code(global_code.read(), balance_adjust[i].read()));
+                add_signed_code(base_code, balance_adjust[i].read()));
         }
     }
 
@@ -160,9 +194,11 @@ SC_MODULE(distributed_pdn_system) {
 
     void apply_runtime_options(bool enable_eec,
                                bool enable_learning,
-                               bool enable_balance)
+                               bool enable_balance,
+                               bool use_paper_fixed_profile = false)
     {
         learner.enabled = enable_learning;
+        learner.paper_fixed_profile = use_paper_fixed_profile;
         balancer.enabled = enable_balance;
         for (std::size_t i = 0; i < num_ldos; ++i)
             lldo[i].eec_enabled = enable_eec;
@@ -181,6 +217,7 @@ SC_MODULE(distributed_pdn_system) {
           grid_resistance(grid_resistance_),
           local_cout(local_cout_),
           grid_decap(grid_decap_),
+          nominal_vref(nominal_vref_),
           clk_sys("clk_sys"),
           rst_n("rst_n"),
           load_current("load_current", num_ldos_),
@@ -310,6 +347,7 @@ SC_MODULE(distributed_pdn_system) {
 
         SC_METHOD(update_global_distribution);
         sensitive << global_code;
+        sensitive << learned_vref << max_vout_de << weight_sparsity;
         for (std::size_t i = 0; i < num_ldos; ++i)
             sensitive << balance_adjust[i];
 

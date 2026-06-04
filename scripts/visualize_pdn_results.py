@@ -47,8 +47,8 @@ LEARNING_METRICS = (
 PHASE_LABELS = (
     "VREFL",
     "VREFH",
-    "CTieLo",
     "CTieHi",
+    "CTieLo",
     "Done",
 )
 
@@ -63,6 +63,12 @@ CASE_SUMMARY_METRICS = (
      "Droop reduction at best peak-to-peak iteration (%)"),
     ("avg_guardband_power_mw", "Average guardband power (mW)"),
     ("avg_switching_power_mw", "Average switching power (mW)"),
+)
+
+BENEFIT_CASES = (
+    ("no_eec", "w/o EEC", "#f6a04d", "#d46d1c"),
+    ("no_learning", "w/o Learning", "#f3cf59", "#b78e11"),
+    ("full", "w/ Learning", "#a8bf72", "#6f8d42"),
 )
 
 PAPER_METRICS = (
@@ -130,6 +136,17 @@ def group_by(rows, key):
 
 def sorted_by_float(rows, key):
     return sorted(rows, key=lambda row: to_float(row, key))
+
+
+def sparsity_value(scenario):
+    match = re.search(r"(?:^|_)(\d+(?:\.\d+)?)pct", scenario)
+    if not match:
+        return math.nan
+    return float(match.group(1))
+
+
+def is_sparsity_scenario(scenario):
+    return scenario != "overall_ai" and math.isfinite(sparsity_value(scenario))
 
 
 def set_common_style(ax, title, xlabel, ylabel):
@@ -285,6 +302,62 @@ def save_paper_comparison_plot(plt, np, out_path, rows):
     return True
 
 
+def save_full_droop_reduction_plot(plt, np, out_path, rows):
+    rows = [
+        row for row in rows
+        if row.get("metric") == "droop_reduction" and
+        is_sparsity_scenario(row.get("scenario", "")) and
+        math.isfinite(to_float(row, "paper_value")) and
+        math.isfinite(to_float(row, "model_value"))
+    ]
+    rows = sorted(rows, key=lambda row: (sparsity_value(row["scenario"]),
+                                         row["scenario"]))
+    if not rows:
+        return False
+
+    labels = [f"{sparsity_value(row['scenario']):g}" for row in rows]
+    paper = [to_float(row, "paper_value") for row in rows]
+    model = [to_float(row, "model_value") for row in rows]
+    x = np.arange(len(rows))
+    width = 0.34
+
+    fig, ax = plt.subplots(figsize=(8.8, 4.8))
+    paper_bars = ax.bar(x - width / 2.0, paper, width, label="paper",
+                        color="#2b78b8")
+    model_bars = ax.bar(x + width / 2.0, model, width, label="model full",
+                        color="#f28e2b")
+
+    set_common_style(ax, "Full case droop reduction vs paper",
+                     "Sparsity (%)", "Droop reduction (%)")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels)
+    values = paper + model
+    y_min = min(values)
+    y_max = max(values)
+    y_span = max(y_max - y_min, 1.0)
+    ax.set_ylim(min(0.0, y_min - 0.15 * y_span),
+                y_max + 0.18 * y_span)
+    ax.legend(loc="best", frameon=False)
+
+    for bars in (paper_bars, model_bars):
+        for bar in bars:
+            height = bar.get_height()
+            label_pad = 0.03 * y_span
+            ax.text(
+                bar.get_x() + bar.get_width() / 2.0,
+                height + label_pad if height >= 0.0 else height - label_pad,
+                f"{height:.1f}%",
+                ha="center",
+                va="bottom" if height >= 0.0 else "top",
+                fontsize=8,
+            )
+
+    fig.tight_layout()
+    fig.savefig(out_path)
+    plt.close(fig)
+    return True
+
+
 def save_performance_plot(plt, np, out_path, rows):
     rows = [
         row for row in rows
@@ -307,6 +380,216 @@ def save_performance_plot(plt, np, out_path, rows):
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=60, ha="right")
     fig.tight_layout()
+    fig.savefig(out_path)
+    plt.close(fig)
+    return True
+
+
+def performance_score(row, veff_key):
+    if not row:
+        return math.nan
+    veff_v = to_float(row, veff_key)
+    vth_v = to_float(row, "vth_v")
+    alpha = to_float(row, "alpha")
+    if not all(math.isfinite(value) for value in (veff_v, vth_v, alpha)):
+        return math.nan
+    if veff_v <= vth_v or veff_v <= 0.0:
+        return 0.0
+    return 100.0 * ((veff_v - vth_v) ** alpha) / veff_v
+
+
+def pct_gain(new_value, old_value):
+    if not math.isfinite(new_value) or not math.isfinite(old_value):
+        return math.nan
+    if abs(old_value) <= 1.0e-18:
+        return math.nan
+    return (new_value / old_value - 1.0) * 100.0
+
+
+def format_pct(value):
+    if not math.isfinite(value):
+        return ""
+    return f"+{value:.1f}%" if value >= 0.0 else f"{value:.1f}%"
+
+
+def annotate_gain(ax, base_x, base_y, full_x, full_y, gain_pct, y_pad):
+    if not all(math.isfinite(value) for value in
+               (base_x, base_y, full_x, full_y, gain_pct)):
+        return
+    top = max(base_y, full_y)
+    ax.annotate(
+        "",
+        xy=(full_x, full_y),
+        xytext=(base_x, base_y),
+        arrowprops={
+            "arrowstyle": "->",
+            "color": "#c6534b",
+            "linestyle": "--",
+            "linewidth": 1.1,
+            "shrinkA": 2,
+            "shrinkB": 2,
+        },
+    )
+    ax.text(
+        (base_x + full_x) / 2.0,
+        top + y_pad,
+        format_pct(gain_pct),
+        ha="center",
+        va="bottom",
+        fontsize=9,
+        fontweight="bold",
+    )
+
+
+def save_overall_benefits_plot(plt, np, out_path, case_rows, energy_rows,
+                               performance_rows):
+    summary = {
+        (row.get("case"), row.get("scenario")): row
+        for row in case_rows
+    }
+    scenarios = sorted(
+        {
+            row.get("scenario")
+            for row in case_rows
+            if is_sparsity_scenario(row.get("scenario", ""))
+        },
+        key=lambda scenario: (sparsity_value(scenario), scenario),
+    )
+    if not scenarios:
+        return False
+
+    x = np.arange(len(scenarios))
+    width = 0.22
+    offsets = {
+        case: (index - (len(BENEFIT_CASES) - 1) / 2.0) * width
+        for index, (case, _, _, _) in enumerate(BENEFIT_CASES)
+    }
+
+    perf_lookup = {
+        (row.get("comparison"), row.get("scenario")): row
+        for row in performance_rows
+    }
+    energy_lookup = {
+        (row.get("comparison"), row.get("scenario")): row
+        for row in energy_rows
+    }
+
+    tops_per_w_values = {case: [] for case, _, _, _ in BENEFIT_CASES}
+    perf_values = {case: [] for case, _, _, _ in BENEFIT_CASES}
+
+    for scenario in scenarios:
+        full_row = (
+            perf_lookup.get(("full_vs_no_learning", scenario)) or
+            perf_lookup.get(("full_vs_no_eec", scenario))
+        )
+        no_learning_row = perf_lookup.get(("full_vs_no_learning", scenario))
+        no_eec_row = perf_lookup.get(("full_vs_no_eec", scenario))
+
+        tops_per_w_values["no_eec"].append(
+            to_float(no_eec_row, "baseline_tops_per_w"))
+        tops_per_w_values["no_learning"].append(
+            to_float(no_learning_row, "baseline_tops_per_w"))
+        tops_per_w_values["full"].append(
+            to_float(full_row, "full_tops_per_w"))
+
+        perf_values["no_eec"].append(to_float(no_eec_row, "baseline_tops"))
+        perf_values["no_learning"].append(
+            to_float(no_learning_row, "baseline_tops"))
+        perf_values["full"].append(to_float(full_row, "full_tops"))
+
+        if not math.isfinite(perf_values["no_eec"][-1]):
+            perf_values["no_eec"][-1] = performance_score(
+                no_eec_row, "baseline_veff_v")
+        if not math.isfinite(perf_values["no_learning"][-1]):
+            perf_values["no_learning"][-1] = performance_score(
+                no_learning_row, "baseline_veff_v")
+        if not math.isfinite(perf_values["full"][-1]):
+            perf_values["full"][-1] = performance_score(
+                full_row, "full_veff_v")
+
+    eff_finite = [
+        value for values in tops_per_w_values.values() for value in values
+        if math.isfinite(value)
+    ]
+    perf_finite = [
+        value for values in perf_values.values() for value in values
+        if math.isfinite(value)
+    ]
+    if not eff_finite and not perf_finite:
+        return False
+
+    fig, (ax_eff, ax_perf) = plt.subplots(1, 2, figsize=(12.8, 4.35))
+    fig.suptitle("Overall Benefits for AI Computing", fontsize=18,
+                 fontweight="bold", y=0.98)
+
+    for case, label, face_color, edge_color in BENEFIT_CASES:
+        positions = x + offsets[case]
+        ax_eff.bar(positions, tops_per_w_values[case], width, label=label,
+                   color=face_color, edgecolor=edge_color, linewidth=1.4)
+        ax_perf.bar(positions, perf_values[case], width, label=label,
+                    color=face_color, edgecolor=edge_color, linewidth=1.4)
+
+    sparsity_labels = [
+        f"{sparsity_value(scenario):g}" for scenario in scenarios
+    ]
+    for ax in (ax_eff, ax_perf):
+        ax.set_xticks(x)
+        ax.set_xticklabels(sparsity_labels, fontsize=11, fontweight="bold")
+        ax.set_xlabel("Sparsity (%)", fontsize=12, fontweight="bold")
+        ax.grid(True, axis="y", alpha=0.3)
+        ax.set_axisbelow(True)
+
+    ax_eff.set_title("Efficiency Improvement", fontsize=13,
+                     fontweight="bold")
+    ax_eff.set_ylabel("Eff. (TOPS/W)", fontsize=12, fontweight="bold")
+    ax_perf.set_title("Perf. Improvement", fontsize=13, fontweight="bold")
+    ax_perf.set_ylabel("Perf. (TOPS)", fontsize=12, fontweight="bold")
+
+    eff_pad = max(max(eff_finite) * 0.035, 1.0) if eff_finite else 1.0
+    perf_pad = max(max(perf_finite) * 0.04, 1.0) if perf_finite else 1.0
+    for index, scenario in enumerate(scenarios):
+        eff_gain = pct_gain(tops_per_w_values["full"][index],
+                            tops_per_w_values["no_learning"][index])
+        if not math.isfinite(eff_gain):
+            energy_row = energy_lookup.get(("full_vs_no_learning", scenario), {})
+            eff_gain = to_float(energy_row, "energy_saving_pct")
+        annotate_gain(
+            ax_eff,
+            x[index] + offsets["no_learning"],
+            tops_per_w_values["no_learning"][index],
+            x[index] + offsets["full"],
+            tops_per_w_values["full"][index],
+            eff_gain,
+            eff_pad,
+        )
+
+        perf_row = perf_lookup.get(("full_vs_no_learning", scenario), {})
+        annotate_gain(
+            ax_perf,
+            x[index] + offsets["no_learning"],
+            perf_values["no_learning"][index],
+            x[index] + offsets["full"],
+            perf_values["full"][index],
+            to_float(perf_row, "performance_improvement_pct"),
+            perf_pad,
+        )
+
+    if eff_finite:
+        ax_eff.set_ylim(0.0, max(eff_finite) + eff_pad * 4.0)
+    if perf_finite:
+        ax_perf.set_ylim(0.0, max(perf_finite) + perf_pad * 4.0)
+
+    handles, labels = ax_eff.get_legend_handles_labels()
+    fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.46, 0.91),
+               ncols=3, frameon=False, fontsize=11)
+    fig.text(
+        0.99,
+        0.02,
+        "TOPS uses the calibrated alpha-power droop/overshoot model.",
+        ha="right",
+        fontsize=8,
+    )
+    fig.tight_layout(rect=(0.0, 0.05, 1.0, 0.85))
     fig.savefig(out_path)
     plt.close(fig)
     return True
@@ -427,10 +710,23 @@ def visualize(results_dir, out_dir, image_format, dpi):
     if save_paper_comparison_plot(plt, np, path, paper_rows):
         add_gallery_item(gallery, "Paper value vs model value", path, out_dir)
 
+    path = out_dir / f"full_droop_reduction_vs_paper.{image_format}"
+    if save_full_droop_reduction_plot(plt, np, path, paper_rows):
+        add_gallery_item(gallery, "Full case droop reduction vs paper",
+                         path, out_dir)
+
     perf_rows = read_rows(results_dir / "performance_summary.csv")
     path = out_dir / f"performance_summary.{image_format}"
     if save_performance_plot(plt, np, path, perf_rows):
         add_gallery_item(gallery, "Performance improvement estimates", path, out_dir)
+
+    energy_rows = read_rows(results_dir / "energy_summary.csv")
+    path = out_dir / f"overall_ai_benefits.{image_format}"
+    if save_overall_benefits_plot(
+        plt, np, path, summary_rows, energy_rows, perf_rows,
+    ):
+        add_gallery_item(gallery, "Overall benefits for AI computing",
+                         path, out_dir)
 
     write_index(out_dir / "index.html", gallery)
     return gallery

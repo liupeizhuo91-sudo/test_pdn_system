@@ -21,6 +21,9 @@ Performance is estimated with an alpha-power DVFS model:
   Veff = Vnom - droop
   fmax_score = (Veff - Vth)^alpha / Veff
   performance_improvement = (fmax_score_full / fmax_score_baseline - 1) * 100
+
+Window selection defaults to the simulation-selected best peak-to-peak window.
+The paper-reported best iteration is kept only as a reference value.
 """
 
 import argparse
@@ -31,9 +34,19 @@ from pathlib import Path
 
 AI_SCENARIOS = (
     "dense_10pct_75pct",
+    "dense_mid_30pct_62p5pct",
     "medium_50pct_50pct",
+    "sparse_mid_70pct_37p5pct",
     "sparse_90pct_25pct",
 )
+
+PAPER_BEST_ITER = {
+    "dense_10pct_75pct": 29,
+    "dense_mid_30pct_62p5pct": 26,
+    "medium_50pct_50pct": 23,
+    "sparse_mid_70pct_37p5pct": 23,
+    "sparse_90pct_25pct": 23,
+}
 
 CASES = (
     "full",
@@ -62,6 +75,9 @@ DEFAULT_ALPHA = 1.3
 DEFAULT_DROOP_PERCENTILE = 95.0
 DEFAULT_OVERSHOOT_ALLOWANCE_MV = 10.0
 DEFAULT_OVERSHOOT_PENALTY = 1.0
+DEFAULT_NOMINAL_TOPS = 4.2
+DEFAULT_WINDOW_POLICY = "sim_best"
+DEFAULT_STABLE_WINDOWS = 4
 
 
 def read_rows(path):
@@ -138,12 +154,23 @@ def sorted_by_float(rows, key):
     return sorted(rows, key=lambda row: to_float(row, key))
 
 
-def best_pkpk_row(rows, scenario):
-    subset = sorted_by_float(scenario_rows(rows, scenario), "iteration")
-    if not subset:
+def last_rows(rows, count=DEFAULT_STABLE_WINDOWS):
+    rows = sorted_by_float(rows, "iteration")
+    return rows[-count:] if len(rows) > count else rows
+
+
+def closest_iteration_row(rows, iteration):
+    rows = sorted_by_float(rows, "iteration")
+    if not rows:
+        return None
+    return min(rows, key=lambda row: abs(to_float(row, "iteration") - iteration))
+
+
+def best_pkpk_from_subset(rows):
+    if not rows:
         return None
     return min(
-        subset,
+        rows,
         key=lambda row: (
             to_float(row, "pkpk_mv")
             if math.isfinite(to_float(row, "pkpk_mv"))
@@ -152,13 +179,56 @@ def best_pkpk_row(rows, scenario):
     )
 
 
-def summarize_case(case, rows):
+def selected_rows(rows, scenario, policy=DEFAULT_WINDOW_POLICY):
+    if scenario == "overall_ai":
+        selected = []
+        for item in AI_SCENARIOS:
+            selected.extend(selected_rows(rows, item, policy))
+        return selected
+
+    subset = sorted_by_float(scenario_rows(rows, scenario), "iteration")
+    if not subset:
+        return []
+
+    if policy == "all":
+        return subset
+
+    if policy == "sim_best":
+        row = best_pkpk_from_subset(subset)
+        return [row] if row else []
+
+    if policy == "paper_iter":
+        target = PAPER_BEST_ITER.get(scenario)
+        if target is not None:
+            row = closest_iteration_row(subset, target)
+            return [row] if row else []
+        return last_rows(subset)
+
+    if policy == "converged_done":
+        done = [row for row in subset if row.get("learning_phase_name") == "done"]
+        return last_rows(done or subset)
+
+    if policy == "final_stable":
+        return last_rows(subset)
+
+    raise ValueError(f"unknown window policy: {policy}")
+
+
+def best_pkpk_row(rows, scenario, policy=DEFAULT_WINDOW_POLICY):
+    subset = selected_rows(rows, scenario, policy)
+    return best_pkpk_from_subset(subset)
+
+
+def summarize_case(case, rows, window_policy=DEFAULT_WINDOW_POLICY):
     out = []
     scenarios = sorted({row["scenario"] for row in rows})
     for scenario in scenarios:
-        subset = sorted_by_float(scenario_rows(rows, scenario), "iteration")
-        best_row = best_pkpk_row(rows, scenario)
-        baseline_droop = to_float(subset[0], "baseline_droop_mv")
+        all_subset = sorted_by_float(scenario_rows(rows, scenario), "iteration")
+        subset = selected_rows(rows, scenario, window_policy)
+        best_row = best_pkpk_row(rows, scenario, window_policy)
+        if not all_subset or not subset or not best_row:
+            continue
+        baseline_droop = to_float(all_subset[0], "baseline_droop_mv")
         droop_at_best_pkpk = to_float(best_row, "droop_mv")
         out.append({
             "case": case,
@@ -183,11 +253,8 @@ def summarize_case(case, rows):
     return out
 
 
-def scenario_power(rows, scenario):
-    if scenario == "overall_ai":
-        subset = [row for row in rows if row["scenario"] in AI_SCENARIOS]
-    else:
-        subset = scenario_rows(rows, scenario)
+def scenario_power(rows, scenario, window_policy=DEFAULT_WINDOW_POLICY):
+    subset = selected_rows(rows, scenario, window_policy)
     return {
         "pin_mw": avg(to_float(r, "pin_mw") for r in subset),
         "pout_mw": avg(to_float(r, "pout_mw") for r in subset),
@@ -195,9 +262,10 @@ def scenario_power(rows, scenario):
     }
 
 
-def energy_row(name, scenario, full_rows, base_rows):
-    full = scenario_power(full_rows, scenario)
-    base = scenario_power(base_rows, scenario)
+def energy_row(name, scenario, full_rows, base_rows,
+               window_policy=DEFAULT_WINDOW_POLICY):
+    full = scenario_power(full_rows, scenario, window_policy)
+    base = scenario_power(base_rows, scenario, window_policy)
     saving = (
         (base["pin_mw"] - full["pin_mw"]) / base["pin_mw"] * 100.0
         if math.isfinite(base["pin_mw"]) and abs(base["pin_mw"]) > 1.0e-18
@@ -216,31 +284,27 @@ def energy_row(name, scenario, full_rows, base_rows):
     }
 
 
-def build_energy_summary(case_rows):
+def build_energy_summary(case_rows, window_policy=DEFAULT_WINDOW_POLICY):
     full_rows = case_rows["full"]
     rows = []
     for name, baseline_case in COMPARISONS:
         base_rows = case_rows[baseline_case]
         for scenario in AI_SCENARIOS:
-            rows.append(energy_row(name, scenario, full_rows, base_rows))
+            rows.append(energy_row(name, scenario, full_rows, base_rows,
+                                   window_policy))
 
-        rows.append(energy_row(name, "overall_ai", full_rows, base_rows))
+        rows.append(energy_row(name, "overall_ai", full_rows, base_rows,
+                               window_policy))
     return rows
 
 
-def droop_stat(rows, scenario, pct):
-    if scenario == "overall_ai":
-        subset = [row for row in rows if row["scenario"] in AI_SCENARIOS]
-    else:
-        subset = scenario_rows(rows, scenario)
+def droop_stat(rows, scenario, pct, window_policy=DEFAULT_WINDOW_POLICY):
+    subset = selected_rows(rows, scenario, window_policy)
     return percentile((to_float(row, "droop_mv") for row in subset), pct)
 
 
-def overshoot_stat(rows, scenario, pct):
-    if scenario == "overall_ai":
-        subset = [row for row in rows if row["scenario"] in AI_SCENARIOS]
-    else:
-        subset = scenario_rows(rows, scenario)
+def overshoot_stat(rows, scenario, pct, window_policy=DEFAULT_WINDOW_POLICY):
+    subset = selected_rows(rows, scenario, window_policy)
     return percentile((to_float(row, "overshoot_mv") for row in subset), pct)
 
 
@@ -252,8 +316,8 @@ def voltage_limiter_mv(droop_mv, overshoot_mv, overshoot_allowance_mv,
     return droop_mv + overshoot_penalty * overshoot_excess
 
 
-def scenario_weight(rows, scenario):
-    subset = scenario_rows(rows, scenario)
+def scenario_weight(rows, scenario, window_policy=DEFAULT_WINDOW_POLICY):
+    subset = selected_rows(rows, scenario, window_policy)
     return avg(to_float(row, "avg_load_ma") for row in subset)
 
 
@@ -263,13 +327,30 @@ def fmax_score(veff_v, vth_v, alpha):
     return ((veff_v - vth_v) ** alpha) / veff_v
 
 
+def tops_from_score(score, ref_score, nominal_tops):
+    if not math.isfinite(score) or not math.isfinite(ref_score) or ref_score <= 0.0:
+        return math.nan
+    return nominal_tops * score / ref_score
+
+
+def tops_per_w(tops, pin_mw):
+    if not math.isfinite(tops) or not math.isfinite(pin_mw) or pin_mw <= 0.0:
+        return math.nan
+    return tops / (pin_mw * 1.0e-3)
+
+
 def performance_row(name, scenario, full_rows, base_rows, vnom_v, vth_v,
                     alpha, droop_percentile, overshoot_allowance_mv,
-                    overshoot_penalty):
-    full_droop_mv = droop_stat(full_rows, scenario, droop_percentile)
-    base_droop_mv = droop_stat(base_rows, scenario, droop_percentile)
-    full_overshoot_mv = overshoot_stat(full_rows, scenario, droop_percentile)
-    base_overshoot_mv = overshoot_stat(base_rows, scenario, droop_percentile)
+                    overshoot_penalty, nominal_tops,
+                    window_policy=DEFAULT_WINDOW_POLICY):
+    full_droop_mv = droop_stat(full_rows, scenario, droop_percentile,
+                               window_policy)
+    base_droop_mv = droop_stat(base_rows, scenario, droop_percentile,
+                               window_policy)
+    full_overshoot_mv = overshoot_stat(full_rows, scenario, droop_percentile,
+                                       window_policy)
+    base_overshoot_mv = overshoot_stat(base_rows, scenario, droop_percentile,
+                                       window_policy)
     full_limiter_mv = voltage_limiter_mv(
         full_droop_mv, full_overshoot_mv, overshoot_allowance_mv,
         overshoot_penalty)
@@ -280,6 +361,13 @@ def performance_row(name, scenario, full_rows, base_rows, vnom_v, vth_v,
     base_veff_v = vnom_v - base_limiter_mv * 1.0e-3
     full_score = fmax_score(full_veff_v, vth_v, alpha)
     base_score = fmax_score(base_veff_v, vth_v, alpha)
+    ref_score = fmax_score(vnom_v, vth_v, alpha)
+    full_tops = tops_from_score(full_score, ref_score, nominal_tops)
+    base_tops = tops_from_score(base_score, ref_score, nominal_tops)
+    full_power = scenario_power(full_rows, scenario, window_policy)
+    base_power = scenario_power(base_rows, scenario, window_policy)
+    full_tops_per_w = tops_per_w(full_tops, full_power["pin_mw"])
+    base_tops_per_w = tops_per_w(base_tops, base_power["pin_mw"])
     f_ratio = (
         full_score / base_score
         if math.isfinite(full_score) and math.isfinite(base_score) and
@@ -305,24 +393,37 @@ def performance_row(name, scenario, full_rows, base_rows, vnom_v, vth_v,
         "alpha": fmt(alpha),
         "overshoot_allowance_mv": fmt(overshoot_allowance_mv),
         "overshoot_penalty": fmt(overshoot_penalty),
+        "nominal_tops": fmt(nominal_tops),
+        "full_tops": fmt(full_tops),
+        "baseline_tops": fmt(base_tops),
+        "full_tops_per_w": fmt(full_tops_per_w),
+        "baseline_tops_per_w": fmt(base_tops_per_w),
         "f_ratio": fmt(f_ratio),
         "performance_improvement_pct": fmt(improvement),
-        "weight": fmt(scenario_weight(full_rows, scenario)
+        "weight": fmt(scenario_weight(full_rows, scenario, window_policy)
                       if scenario != "overall_ai" else math.nan),
         "status": "estimated" if math.isfinite(improvement) else "invalid",
-        "note": "alpha-power estimate using droop plus excess-overshoot limiter",
+        "note": f"alpha-power estimate using {window_policy} windows",
     }
 
 
 def overall_performance_row(name, scenario_rows_, vnom_v, vth_v, alpha,
                             droop_percentile, overshoot_allowance_mv,
-                            overshoot_penalty):
+                            overshoot_penalty, nominal_tops):
     weighted = []
+    full_tops_weighted = []
+    base_tops_weighted = []
     for row in scenario_rows_:
         f_ratio = float(row["f_ratio"]) if row["f_ratio"] else math.nan
         weight = float(row["weight"]) if row["weight"] else math.nan
         if math.isfinite(f_ratio) and f_ratio > 0.0 and math.isfinite(weight) and weight > 0.0:
             weighted.append((weight, f_ratio))
+            full_tops = float(row["full_tops"]) if row["full_tops"] else math.nan
+            base_tops = float(row["baseline_tops"]) if row["baseline_tops"] else math.nan
+            if math.isfinite(full_tops):
+                full_tops_weighted.append((weight, full_tops))
+            if math.isfinite(base_tops):
+                base_tops_weighted.append((weight, base_tops))
 
     if weighted:
         total_weight = sum(weight for weight, _ in weighted)
@@ -333,6 +434,16 @@ def overall_performance_row(name, scenario_rows_, vnom_v, vth_v, alpha,
         harmonic_speedup = math.nan
         improvement = math.nan
     complete = len(weighted) == len(scenario_rows_)
+    full_tops = (
+        sum(weight * value for weight, value in full_tops_weighted) /
+        sum(weight for weight, _ in full_tops_weighted)
+        if full_tops_weighted else math.nan
+    )
+    base_tops = (
+        sum(weight * value for weight, value in base_tops_weighted) /
+        sum(weight for weight, _ in base_tops_weighted)
+        if base_tops_weighted else math.nan
+    )
 
     return {
         "comparison": name,
@@ -351,6 +462,11 @@ def overall_performance_row(name, scenario_rows_, vnom_v, vth_v, alpha,
         "alpha": fmt(alpha),
         "overshoot_allowance_mv": fmt(overshoot_allowance_mv),
         "overshoot_penalty": fmt(overshoot_penalty),
+        "nominal_tops": fmt(nominal_tops),
+        "full_tops": fmt(full_tops),
+        "baseline_tops": fmt(base_tops),
+        "full_tops_per_w": "",
+        "baseline_tops_per_w": "",
         "f_ratio": fmt(harmonic_speedup),
         "performance_improvement_pct": fmt(improvement),
         "weight": fmt(total_weight),
@@ -362,7 +478,8 @@ def overall_performance_row(name, scenario_rows_, vnom_v, vth_v, alpha,
 
 def build_performance_summary(case_rows, vnom_v, vth_v, alpha,
                               droop_percentile, overshoot_allowance_mv,
-                              overshoot_penalty):
+                              overshoot_penalty, nominal_tops,
+                              window_policy=DEFAULT_WINDOW_POLICY):
     full_rows = case_rows["full"]
     rows = []
     for name, baseline_case in COMPARISONS:
@@ -371,13 +488,14 @@ def build_performance_summary(case_rows, vnom_v, vth_v, alpha,
         for scenario in AI_SCENARIOS:
             row = performance_row(name, scenario, full_rows, base_rows,
                                   vnom_v, vth_v, alpha, droop_percentile,
-                                  overshoot_allowance_mv, overshoot_penalty)
+                                  overshoot_allowance_mv, overshoot_penalty,
+                                  nominal_tops, window_policy)
             comparison_rows.append(row)
             rows.append(row)
         rows.append(overall_performance_row(name, comparison_rows, vnom_v,
                                             vth_v, alpha, droop_percentile,
                                             overshoot_allowance_mv,
-                                            overshoot_penalty))
+                                            overshoot_penalty, nominal_tops))
     return rows
 
 
@@ -404,7 +522,7 @@ def complete_paper_comparison(results_dir, energy_rows, performance_rows,
         unit = ""
         if "reduction" in metric:
             unit = "%"
-        elif metric == "best_iteration":
+        elif metric in ("best_iteration", "best_pkpk_iteration"):
             unit = "iter"
         elif "droop" in metric or "pkpk" in metric:
             unit = "mV"
@@ -618,6 +736,14 @@ def main():
     parser.add_argument("--overshoot-penalty", type=float,
                         default=DEFAULT_OVERSHOOT_PENALTY,
                         help="Penalty multiplier for overshoot above allowance.")
+    parser.add_argument("--nominal-tops", type=float,
+                        default=DEFAULT_NOMINAL_TOPS,
+                        help="Nominal compute throughput at the reference voltage.")
+    parser.add_argument("--window-policy",
+                        choices=("all", "sim_best", "paper_iter", "converged_done",
+                                 "final_stable"),
+                        default=DEFAULT_WINDOW_POLICY,
+                        help="Which learning windows are used for summaries.")
     args = parser.parse_args()
 
     results_dir = Path(args.results_dir)
@@ -625,7 +751,7 @@ def main():
 
     case_summary = []
     for case, rows in case_rows.items():
-        case_summary.extend(summarize_case(case, rows))
+        case_summary.extend(summarize_case(case, rows, args.window_policy))
     write_rows(
         results_dir / "case_summary.csv",
         (
@@ -650,7 +776,7 @@ def main():
         case_summary,
     )
 
-    energy_summary = build_energy_summary(case_rows)
+    energy_summary = build_energy_summary(case_rows, args.window_policy)
     write_rows(
         results_dir / "energy_summary.csv",
         (
@@ -670,7 +796,7 @@ def main():
     performance_summary = build_performance_summary(
         case_rows, args.vnom_v, args.vth_v, args.alpha,
         args.droop_percentile, args.overshoot_allowance_mv,
-        args.overshoot_penalty)
+        args.overshoot_penalty, args.nominal_tops, args.window_policy)
     write_rows(
         results_dir / "performance_summary.csv",
         (
@@ -690,6 +816,11 @@ def main():
             "alpha",
             "overshoot_allowance_mv",
             "overshoot_penalty",
+            "nominal_tops",
+            "full_tops",
+            "baseline_tops",
+            "full_tops_per_w",
+            "baseline_tops_per_w",
             "f_ratio",
             "performance_improvement_pct",
             "weight",

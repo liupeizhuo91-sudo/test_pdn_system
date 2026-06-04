@@ -28,6 +28,25 @@ double parse_double_option(const std::string& arg, const char* prefix,
     return std::atof(arg.substr(std::string(prefix).size()).c_str());
 }
 
+int scenario_name_to_index(const std::string& name)
+{
+    if (name == "all")
+        return -1;
+    if (name == "dense_10pct_75pct")
+        return 0;
+    if (name == "dense_mid_30pct_62p5pct")
+        return 1;
+    if (name == "medium_50pct_50pct")
+        return 2;
+    if (name == "sparse_mid_70pct_37p5pct")
+        return 3;
+    if (name == "sparse_90pct_25pct")
+        return 4;
+    if (name == "load_step_116_506_330ma" || name == "load_step")
+        return 5;
+    return -2;
+}
+
 double calibrated_dynamic_current(double target_dense_avg_current,
                                   double leakage_current,
                                   std::size_t clusters,
@@ -79,7 +98,10 @@ int sc_main(int argc, char* argv[])
     bool enable_eec = true;
     bool enable_learning = true;
     bool enable_balance = true;
+    bool use_paper_fixed_profile = false;
     bool enable_trace = true;
+    int forced_scenario_index = -1;
+    std::string scenario_name = "all";
     const unsigned learn_window_cycles = 256;
     const unsigned scenario_windows = 32;
     const unsigned warmup_windows = 4;
@@ -111,8 +133,17 @@ int sc_main(int argc, char* argv[])
             enable_learning = false;
         } else if (arg == "--disable-balance") {
             enable_balance = false;
+        } else if (arg == "--paper-no-learning-profile") {
+            use_paper_fixed_profile = true;
         } else if (arg == "--no-trace") {
             enable_trace = false;
+        } else if (starts_with(arg, "--scenario=")) {
+            scenario_name = arg.substr(std::string("--scenario=").size());
+            forced_scenario_index = scenario_name_to_index(scenario_name);
+            if (forced_scenario_index < -1) {
+                std::cerr << "Unknown scenario: " << scenario_name << "\n";
+                return 1;
+            }
         } else if (starts_with(arg, "--dynamic-current-ma=")) {
             workload_dynamic_current =
                 parse_double_option(arg, "--dynamic-current-ma=", 18.0) * 1.0e-3;
@@ -203,6 +234,7 @@ int sc_main(int argc, char* argv[])
                             sparse_activity_gain,
                             burst_low_ratio,
                             warmup_cycles);
+    workload.forced_scenario_index = forced_scenario_index;
     workload.clk(clk_sys);
     workload.rst_n(rst_n);
     workload.weight_sparsity(weight_sparsity);
@@ -226,7 +258,8 @@ int sc_main(int argc, char* argv[])
         dut.load_current[i](load_current[i]);
         dut.activity[i](activity[i]);
     }
-    dut.apply_runtime_options(enable_eec, enable_learning, enable_balance);
+    dut.apply_runtime_options(enable_eec, enable_learning, enable_balance,
+                              use_paper_fixed_profile);
 
     pdn_paper_monitor metrics("metrics", 9, 16, nominal_vref, vin_value,
                               learn_window_cycles, warmup_cycles,
@@ -307,6 +340,9 @@ int sc_main(int argc, char* argv[])
               << "Options: EEC=" << (enable_eec ? "on" : "off")
               << ", learning=" << (enable_learning ? "on" : "off")
               << ", balance=" << (enable_balance ? "on" : "off")
+              << ", paper_fixed_profile="
+              << (use_paper_fixed_profile ? "on" : "off")
+              << ", scenario=" << scenario_name
               << ", trace=" << (enable_trace ? "on" : "off")
               << ", dynamic_current="
               << workload_dynamic_current * 1.0e3 << " mA/cluster"
@@ -330,10 +366,16 @@ int sc_main(int argc, char* argv[])
     sc_core::sc_start(10.0, sc_core::SC_NS);
 
     rst_n.write(true);
-    const unsigned active_cycles =
-        warmup_cycles +
-        scenario_windows * learn_window_cycles * 3 +
-        step_windows * learn_window_cycles;
+    unsigned active_cycles = warmup_cycles;
+    if (forced_scenario_index >= 0) {
+        active_cycles +=
+            (forced_scenario_index == 5 ? step_windows : scenario_windows) *
+            learn_window_cycles;
+    } else {
+        active_cycles +=
+            scenario_windows * learn_window_cycles * 5 +
+            step_windows * learn_window_cycles;
+    }
     const double active_time_ns =
         static_cast<double>(active_cycles) * sys_clk_period_ns;
     sc_core::sc_start(active_time_ns, sc_core::SC_NS);
