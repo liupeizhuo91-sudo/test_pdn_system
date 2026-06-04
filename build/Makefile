@@ -8,6 +8,16 @@ RUN_ENV = LD_LIBRARY_PATH=${SYSTEMC_AMS_HOME}/lib-linux64:${SYSTEMC_HOME}/lib-li
 AI_SCENARIOS ?= dense_10pct_75pct dense_mid_30pct_62p5pct medium_50pct_50pct sparse_mid_70pct_37p5pct sparse_90pct_25pct
 STEP_SCENARIO ?= load_step_116_506_330ma
 SCENARIOS ?= $(AI_SCENARIOS) $(STEP_SCENARIO)
+DENSE_ACTIVITY_GAIN ?= 1.0
+DENSE_MID_ACTIVITY_GAIN ?= 1.35
+MEDIUM_ACTIVITY_GAIN ?= 1.35
+SPARSE_MID_ACTIVITY_GAIN ?= 2.40
+SPARSE_ACTIVITY_GAIN ?= 2.40
+ACTIVITY_GAIN_ARGS = --activity-gain-dense=$(DENSE_ACTIVITY_GAIN) \
+	--activity-gain-dense-mid=$(DENSE_MID_ACTIVITY_GAIN) \
+	--activity-gain-medium=$(MEDIUM_ACTIVITY_GAIN) \
+	--activity-gain-sparse-mid=$(SPARSE_MID_ACTIVITY_GAIN) \
+	--activity-gain-sparse=$(SPARSE_ACTIVITY_GAIN)
 PERF_VNOM_V ?= 0.8
 PERF_VTH_V ?= 0.35
 PERF_ALPHA ?= 1.3
@@ -58,7 +68,7 @@ run-$(1): $(TARGET)
 		echo "  scenario $$$$scenario"; \
 		mkdir -p $(RESULTS_DIR)/$(1)/$$$$scenario; \
 		rm -f pdn_learning_metrics.csv pdn_paper_comparison.csv waveform_pdn_system.vcd; \
-		$(RUN_ENV) ./$(TARGET) $(RUN_COMMON_ARGS) $(2) --scenario=$$$$scenario; \
+		$(RUN_ENV) ./$(TARGET) $(RUN_COMMON_ARGS) $(ACTIVITY_GAIN_ARGS) $(2) --scenario=$$$$scenario; \
 		cp pdn_learning_metrics.csv $(RESULTS_DIR)/$(1)/$$$$scenario/; \
 		cp pdn_paper_comparison.csv $(RESULTS_DIR)/$(1)/$$$$scenario/; \
 		cp pdn_paper_comparison.csv $(RESULTS_DIR)/$(1)/pdn_paper_comparison.csv; \

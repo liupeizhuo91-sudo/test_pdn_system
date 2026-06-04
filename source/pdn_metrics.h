@@ -19,7 +19,10 @@ SC_MODULE(paper_workload) {
     unsigned warmup_cycles;
     double leakage_current;
     double dynamic_current;
+    double dense_activity_gain;
+    double dense_mid_activity_gain;
     double medium_activity_gain;
+    double sparse_mid_activity_gain;
     double sparse_activity_gain;
     double burst_low_ratio;
     unsigned long long cycle;
@@ -82,6 +85,21 @@ SC_MODULE(paper_workload) {
         }
     }
 
+    double activity_gain_for_scenario(int index) const
+    {
+        if (index == 0)
+            return dense_activity_gain;
+        if (index == 1)
+            return dense_mid_activity_gain;
+        if (index == 2)
+            return medium_activity_gain;
+        if (index == 3)
+            return sparse_mid_activity_gain;
+        if (index == 4)
+            return sparse_activity_gain;
+        return 1.0;
+    }
+
     void write_load_step()
     {
         const unsigned long long scenario_cycles =
@@ -136,11 +154,7 @@ SC_MODULE(paper_workload) {
         const bool burst_high = ((effective_cycle / 32ULL) % 2ULL) == 0ULL;
         const double burst = burst_high ? 1.0 : burst_low_ratio;
         const double density = std::max(0.0, 1.0 - sparsity) * toggle;
-        double scenario_gain = 1.0;
-        if (index == 1 || index == 2)
-            scenario_gain = medium_activity_gain;
-        else if (index == 3 || index == 4)
-            scenario_gain = sparse_activity_gain;
+        const double scenario_gain = activity_gain_for_scenario(index);
 
         for (std::size_t i = 0; i < num_clusters; ++i) {
             const double act = std::min(
@@ -169,7 +183,10 @@ SC_MODULE(paper_workload) {
                    unsigned cycles_per_window_ = 256,
                    double leakage_current_ = 1.0e-3,
                    double dynamic_current_ = 18.0e-3,
+                   double dense_activity_gain_ = 1.0,
+                   double dense_mid_activity_gain_ = 1.35,
                    double medium_activity_gain_ = 1.35,
+                   double sparse_mid_activity_gain_ = 2.40,
                    double sparse_activity_gain_ = 2.40,
                    double burst_low_ratio_ = 0.20,
                    unsigned warmup_cycles_ = 0)
@@ -180,7 +197,10 @@ SC_MODULE(paper_workload) {
           warmup_cycles(warmup_cycles_),
           leakage_current(leakage_current_),
           dynamic_current(dynamic_current_),
+          dense_activity_gain(dense_activity_gain_),
+          dense_mid_activity_gain(dense_mid_activity_gain_),
           medium_activity_gain(medium_activity_gain_),
+          sparse_mid_activity_gain(sparse_mid_activity_gain_),
           sparse_activity_gain(sparse_activity_gain_),
           burst_low_ratio(burst_low_ratio_),
           cycle(0),

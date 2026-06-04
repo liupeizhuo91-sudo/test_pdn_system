@@ -51,3 +51,36 @@ def test_makefile_runs_each_scenario_in_a_fresh_process():
     assert "--scenario=$$$$scenario" in source
     assert "$(RESULTS_DIR)/$(1)/$$$$scenario" in source
     assert "tail -n +2 pdn_learning_metrics.csv" in source
+
+
+def test_activity_gain_can_be_tuned_per_scenario():
+    workload = read("source/pdn_metrics.h")
+    top = read("test/test_top.cpp")
+    makefile = read("build/Makefile")
+
+    for field in (
+        "dense_activity_gain",
+        "dense_mid_activity_gain",
+        "medium_activity_gain",
+        "sparse_mid_activity_gain",
+        "sparse_activity_gain",
+    ):
+        assert field in workload
+
+    for option in (
+        "--activity-gain-dense=",
+        "--activity-gain-dense-mid=",
+        "--activity-gain-medium=",
+        "--activity-gain-sparse-mid=",
+        "--activity-gain-sparse=",
+    ):
+        assert option in top
+
+    for variable in (
+        "DENSE_ACTIVITY_GAIN",
+        "DENSE_MID_ACTIVITY_GAIN",
+        "MEDIUM_ACTIVITY_GAIN",
+        "SPARSE_MID_ACTIVITY_GAIN",
+        "SPARSE_ACTIVITY_GAIN",
+    ):
+        assert variable in makefile

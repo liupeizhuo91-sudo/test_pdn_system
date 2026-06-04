@@ -50,12 +50,14 @@ int scenario_name_to_index(const std::string& name)
 double calibrated_dynamic_current(double target_dense_avg_current,
                                   double leakage_current,
                                   std::size_t clusters,
+                                  double dense_activity_gain,
                                   double burst_low_ratio)
 {
     const double dense_density = (1.0 - 0.10) * 0.75;
     const double burst_average = (1.0 + burst_low_ratio) * 0.5;
     const double spatial_sum = 8.35;
-    const double dynamic_gain = dense_density * burst_average * spatial_sum;
+    const double dynamic_gain =
+        dense_density * dense_activity_gain * burst_average * spatial_sum;
     const double leakage_total = static_cast<double>(clusters) * leakage_current;
     const double dynamic =
         (target_dense_avg_current - leakage_total) / dynamic_gain;
@@ -65,6 +67,7 @@ double calibrated_dynamic_current(double target_dense_avg_current,
 double calibrated_background_current(double target_dense_avg_current,
                                      double target_sparse_avg_current,
                                      std::size_t clusters,
+                                     double dense_activity_gain,
                                      double sparse_activity_gain,
                                      double burst_low_ratio)
 {
@@ -72,9 +75,12 @@ double calibrated_background_current(double target_dense_avg_current,
     const double sparse_density = (1.0 - 0.90) * 0.25;
     const double burst_average = (1.0 + burst_low_ratio) * 0.5;
     const double spatial_sum = 8.35;
+    const double dense_effective_density =
+        dense_density * dense_activity_gain;
     const double sparse_effective_density =
         sparse_density * sparse_activity_gain;
-    const double density_delta = dense_density - sparse_effective_density;
+    const double density_delta =
+        dense_effective_density - sparse_effective_density;
     if (density_delta <= 0.0 || clusters == 0)
         return 0.0;
 
@@ -112,7 +118,10 @@ int sc_main(int argc, char* argv[])
     const double vin_value = 0.9;
     double paper_dense_avg_current = 440.0e-3;
     double paper_sparse_avg_proxy = 0.0;
+    double dense_activity_gain = 1.0;
+    double dense_mid_activity_gain = 1.35;
     double medium_activity_gain = 1.35;
+    double sparse_mid_activity_gain = 2.40;
     double sparse_activity_gain = 2.40;
     double burst_low_ratio = 0.20;
     const double eec_latency_bound_ps = 200.0;
@@ -160,12 +169,29 @@ int sc_main(int argc, char* argv[])
             paper_sparse_avg_proxy =
                 parse_double_option(arg, "--target-sparse-avg-ma=", 275.0) * 1.0e-3;
             sparse_target_overridden = true;
-        } else if (starts_with(arg, "--medium-activity-gain=")) {
+        } else if (starts_with(arg, "--activity-gain-dense=")) {
+            dense_activity_gain =
+                parse_double_option(arg, "--activity-gain-dense=", 1.0);
+        } else if (starts_with(arg, "--activity-gain-dense-mid=")) {
+            dense_mid_activity_gain =
+                parse_double_option(arg, "--activity-gain-dense-mid=", 1.35);
+        } else if (starts_with(arg, "--activity-gain-medium=")) {
             medium_activity_gain =
-                parse_double_option(arg, "--medium-activity-gain=", 1.35);
-        } else if (starts_with(arg, "--sparse-activity-gain=")) {
+                parse_double_option(arg, "--activity-gain-medium=", 1.35);
+        } else if (starts_with(arg, "--activity-gain-sparse-mid=")) {
+            sparse_mid_activity_gain =
+                parse_double_option(arg, "--activity-gain-sparse-mid=", 2.40);
+        } else if (starts_with(arg, "--activity-gain-sparse=")) {
             sparse_activity_gain =
+                parse_double_option(arg, "--activity-gain-sparse=", 2.40);
+        } else if (starts_with(arg, "--medium-activity-gain=")) {
+            dense_mid_activity_gain =
+                parse_double_option(arg, "--medium-activity-gain=", 1.35);
+            medium_activity_gain = dense_mid_activity_gain;
+        } else if (starts_with(arg, "--sparse-activity-gain=")) {
+            sparse_mid_activity_gain =
                 parse_double_option(arg, "--sparse-activity-gain=", 2.40);
+            sparse_activity_gain = sparse_mid_activity_gain;
         } else if (starts_with(arg, "--burst-low-ratio=")) {
             burst_low_ratio =
                 parse_double_option(arg, "--burst-low-ratio=", 0.20);
@@ -192,6 +218,7 @@ int sc_main(int argc, char* argv[])
         workload_leakage_current =
             calibrated_background_current(paper_dense_avg_current,
                                           paper_sparse_avg_proxy, 9,
+                                          dense_activity_gain,
                                           sparse_activity_gain,
                                           burst_low_ratio);
     }
@@ -200,6 +227,7 @@ int sc_main(int argc, char* argv[])
         workload_dynamic_current =
             calibrated_dynamic_current(paper_dense_avg_current,
                                        workload_leakage_current, 9,
+                                       dense_activity_gain,
                                        burst_low_ratio);
     }
 
@@ -230,7 +258,10 @@ int sc_main(int argc, char* argv[])
                             learn_window_cycles,
                             workload_leakage_current,
                             workload_dynamic_current,
+                            dense_activity_gain,
+                            dense_mid_activity_gain,
                             medium_activity_gain,
+                            sparse_mid_activity_gain,
                             sparse_activity_gain,
                             burst_low_ratio,
                             warmup_cycles);
@@ -352,8 +383,12 @@ int sc_main(int argc, char* argv[])
               << paper_dense_avg_current * 1.0e3 << " mA"
               << ", sparse_avg_target="
               << paper_sparse_avg_proxy * 1.0e3 << " mA"
-              << ", medium_activity_gain=" << medium_activity_gain
-              << ", sparse_activity_gain=" << sparse_activity_gain
+              << ", activity_gains=["
+              << dense_activity_gain << ", "
+              << dense_mid_activity_gain << ", "
+              << medium_activity_gain << ", "
+              << sparse_mid_activity_gain << ", "
+              << sparse_activity_gain << "]"
               << ", burst_low_ratio=" << burst_low_ratio
               << ", grid_resistance="
               << grid_resistance * 1.0e3 << " mOhm"
